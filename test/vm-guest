@@ -1,0 +1,245 @@
+#!/usr/bin/env bash
+# The part of test/vm that runs inside the virtual machine, as its user, whose sudo asks for no
+# password. test/vm copies it in beside lib.sh and the binaries it built; it is not meant for your
+# own Mac, where it would install adit and turn off automatic login.
+#
+#   vm-guest before-reboot   install, three test servers, traffic, PostUp, status --json, autostart
+#   vm-guest after-reboot    nobody logged in, both tunnels back and passing traffic, then uninstall
+#
+# adit is installed with install.sh: from the release test/vm built, in ./release, or, with
+# ADIT_FROM=release, with the landing page's own line, curl -fsSL https://adit.saulo.pro/install.sh | sh.
+set -euo pipefail
+cd "$(dirname "$0")"
+source ./lib.sh
+export PATH="$PWD/bin:/usr/local/bin:/opt/homebrew/bin:$PATH"
+servers="$HOME/servers"
+label=pro.saulo.adit
+names=(test1 test2)
+addresses=(10.99.1.1 10.99.2.1)
+
+sudo -n true 2> /dev/null || fail "sudo asks for a password here; this runs only where it does not"
+
+wait_up() {
+  for _ in $(seq 150); do
+    adit status "$1" --json 2> /dev/null | grep -q '"state": "up"' && return
+    sleep 0.2
+  done
+  adit status "$1" >&2 || true
+  fail "$1 is not up"
+}
+
+# traffic N: test N's server answers ping, and its DNS answers for its own domain, through the tunnel.
+traffic() {
+  local name=${names[$1]} address=${addresses[$1]}
+  ping -c 3 -t 5 "$address" > /dev/null || fail "$address does not answer through $name"
+  dscacheutil -q host -a name "www.$name.adit.test" | grep -q "ip_address: $address" ||
+    fail "www.$name.adit.test does not resolve through $name"
+  echo "$address answers ping, and www.$name.adit.test resolves to it, through $name"
+}
+
+nobody_logged_in() {
+  [[ $(stat -f %Su /dev/console) == root ]] || fail "$(stat -f %Su /dev/console) is logged in"
+}
+
+# server NAME ADDRESS PORT runs adit's test server from a LaunchDaemon, as this user, from boot on,
+# keeping its keys across the reboot, as a real server would.
+server() {
+  local name=$1 dir="$servers/$1" plist="/Library/LaunchDaemons/$label.test.$1.plist"
+  mkdir -p "$dir"
+  chmod 700 "$dir"
+  sudo tee "$plist" > /dev/null << EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>$label.test.$name</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>$PWD/bin/wgserver</string>
+    <string>-name</string><string>$name</string>
+    <string>-address</string><string>$2</string>
+    <string>-port</string><string>$3</string>
+    <string>-out</string><string>$dir</string>
+    <string>-keys</string><string>$dir</string>
+  </array>
+  <key>UserName</key>
+  <string>$(id -un)</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+</dict>
+</plist>
+EOF
+  sudo chmod 644 "$plist"
+  sudo launchctl bootstrap system "$plist"
+  for _ in $(seq 50); do
+    [[ -s $dir/$name.conf ]] && return
+    sleep 0.1
+  done
+  fail "the test server $name did not start"
+}
+
+before_reboot() {
+  if [[ ${ADIT_FROM:-} == release ]]; then
+    step "install: curl -fsSL https://adit.saulo.pro/install.sh | sh"
+    curl -fsSL https://adit.saulo.pro/install.sh | sh
+  else
+    step "install with install.sh, from the release built for this test"
+    ADIT_DOWNLOAD="file://$PWD/release" sh ./install.sh
+  fi
+  [[ $(command -v adit) == /usr/local/bin/adit ]] || fail "adit is not in /usr/local/bin"
+  expect 4 adit install
+  sudo launchctl print "system/$label" | grep -q 'state = running' || fail "launchd does not show aditd running"
+  [[ $(stat -f '%Su:%Sg %Lp' /var/run/adit/aditd.sock) == "root:adit 660" ]] || fail "the socket is not root:adit 660"
+  for _ in $(seq 25); do
+    pgrep -x adit-tray > /dev/null && break
+    sleep 0.2
+  done
+  pgrep -x adit-tray > /dev/null || fail "the menu bar icon is not running in the desktop session"
+  echo "aditd runs, its socket is root:adit 660, and the menu bar icon runs in the desktop session"
+
+  step "three test servers, started at boot by LaunchDaemons"
+  server test1 10.99.1.1 51821
+  server test2 10.99.2.1 51822
+  server aditwq 10.99.3.1 51823
+
+  step "importing a file with PostUp warns, and bringing it up does not run it"
+  local marker=/tmp/adit-vm-postup-ran
+  sed "/^\[Interface\]/a\\
+PostUp = touch $marker
+" "$servers/test1/test1.conf" > "$HOME/hooked.conf"
+  sudo adit import "$HOME/hooked.conf" --name hooktest 2> "$HOME/hooked.err"
+  grep -q "PostUp line kept but not run" "$HOME/hooked.err" || fail "no PostUp warning on import"
+  cat "$HOME/hooked.err"
+  expect 0 adit up hooktest
+  expect 0 adit down hooktest
+  [[ ! -e $marker ]] || fail "the PostUp line ran"
+  expect 0 sudo adit remove hooktest
+  echo "the PostUp line was kept and never ran"
+
+  step "two adit tunnels and wg-quick's pass traffic together"
+  for n in 0 1; do
+    expect 0 sudo adit import "$servers/${names[$n]}/${names[$n]}.conf"
+    expect 0 adit up "${names[$n]}"
+  done
+  if ! brew list wireguard-tools > /dev/null 2>&1; then
+    HOMEBREW_NO_AUTO_UPDATE=1 brew install --quiet wireguard-tools > "$HOME/brew.log" 2>&1 || {
+      cat "$HOME/brew.log" >&2
+      fail "brew could not install wireguard-tools"
+    }
+  fi
+  # Its DNS line would change the whole machine's DNS.
+  grep -v '^DNS' "$servers/aditwq/aditwq.conf" > "$HOME/aditwq.conf"
+  chmod 600 "$HOME/aditwq.conf"
+  sudo env PATH="$PATH" wg-quick up "$HOME/aditwq.conf" 2> "$HOME/wg-quick.log" || {
+    cat "$HOME/wg-quick.log" >&2
+    fail "wg-quick could not bring aditwq up"
+  }
+  for n in 0 1; do
+    traffic "$n"
+  done
+  ping -c 3 -t 5 10.99.3.1 > /dev/null || fail "10.99.3.1 does not answer through wg-quick's aditwq"
+  echo "10.99.3.1 answers through wg-quick's aditwq"
+  adit list --json | grep -q '"source": "wg-quick"' || fail "adit list does not show wg-quick's tunnel"
+  expect 1 adit down aditwq
+  adit list
+
+  step "status --json gives handshake age and counters"
+  for name in "${names[@]}"; do
+    local json
+    json=$(adit status "$name" --json)
+    for key in '"handshake_age_seconds": [0-9]' '"received_bytes": [1-9]' '"sent_bytes": [1-9]'; do
+      grep -q "$key" <<< "$json" || fail "$name's status lacks $key"
+    done
+  done
+  echo "both report handshake age and bytes each way"
+
+  step "both are set to come back at boot; the machine will stop at the login window"
+  for name in "${names[@]}"; do
+    expect 0 adit autostart "$name" on
+  done
+  sudo defaults delete /Library/Preferences/com.apple.loginwindow autoLoginUser 2> /dev/null || true
+  echo "automatic login is off"
+}
+
+# stamp turns one of aditd's log times, such as 2026-11-25T01:44:12.345+01:00, into seconds.
+stamp() {
+  date -j -f "%Y-%m-%dT%H:%M:%S" "${1%%.*}" +%s
+}
+
+after_reboot() {
+  step "after the reboot, the login window waits and nobody is logged in"
+  nobody_logged_in
+  if pgrep -x adit-tray > /dev/null; then
+    fail "the menu bar icon runs, so someone is logged in"
+  fi
+  local boot
+  boot=$(sysctl -n kern.boottime | sed -E 's/^\{ sec = ([0-9]+),.*/\1/')
+  echo "booted at $(date -r "$boot" +%T); the console belongs to root"
+
+  step "both came back by themselves, and pass traffic, before anyone logs in"
+  for n in 0 1; do
+    local name=${names[$n]} up="" down=""
+    wait_up "$name"
+    while IFS= read -r line; do
+      local at
+      at=$(stamp "$(sed -E 's/^time=([^ ]+) .*/\1/' <<< "$line")")
+      ((at >= boot)) || continue
+      if [[ $line == *'msg="tunnel up"'* ]]; then
+        [[ -n $up ]] || up=$at
+      else
+        down=$at
+      fi
+    done < <(sudo grep -E "msg=\"tunnel (up|down)\" tunnel=$name( |$)" /var/log/aditd.log)
+    [[ -n $up ]] || fail "aditd's log shows $name not coming up after this boot"
+    [[ -z $down ]] || fail "$name went down at $(date -r "$down" +%T)"
+    echo "$name came up at $(date -r "$up" +%T), $((up - boot)) s after boot, and has not gone down since"
+    traffic "$n"
+  done
+  nobody_logged_in
+  echo "still nobody logged in"
+
+  uninstall
+}
+
+uninstall() {
+  step "uninstall removes the service, the interfaces and the stored keys"
+  local interfaces
+  interfaces=$(adit_interfaces adit)
+  [[ -n $interfaces ]] || fail "no tunnel interface to check"
+  expect 0 sudo adit uninstall --yes
+  sleep 1
+  for path in "/Library/LaunchDaemons/$label.plist" "/Library/LaunchAgents/$label.tray.plist" \
+    "/Library/PrivilegedHelperTools/$label" "/etc/newsyslog.d/$label.conf" /var/log/aditd.log /var/db/adit \
+    /var/run/adit /etc/resolver/test1.adit.test /etc/resolver/test2.adit.test; do
+    [[ ! -e $path ]] || fail "$path was left behind"
+  done
+  if dscl . -read /Groups/adit > /dev/null 2>&1; then
+    fail "the adit group was left behind"
+  fi
+  if sudo launchctl print "system/$label" > /dev/null 2>&1; then
+    fail "launchd still knows aditd"
+  fi
+  for iface in $interfaces; do
+    if ifconfig -l | tr ' ' '\n' | grep -qx "$iface"; then
+      fail "$iface was left behind"
+    fi
+  done
+  expect 3 adit list
+  echo "gone: the LaunchDaemon, the binary, the stored keys, the log, the socket, the group and $(wc -w <<< "$interfaces" | tr -d ' ') interfaces"
+
+  step "and the binaries go as install.sh says"
+  sudo rm /usr/local/bin/adit /usr/local/bin/aditd /usr/local/bin/adit-tray
+  for cmd in adit aditd adit-tray; do
+    [[ ! -e /usr/local/bin/$cmd ]] || fail "/usr/local/bin/$cmd was left behind"
+  done
+  echo "nothing of adit is left"
+}
+
+case ${1:-} in
+before-reboot) before_reboot ;;
+after-reboot) after_reboot ;;
+*) fail "usage: vm-guest before-reboot | after-reboot" ;;
+esac

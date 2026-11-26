@@ -1,0 +1,136 @@
+#!/usr/bin/env bash
+# Installs adit on this Mac for real and takes it off again: aditd in /Library/PrivilegedHelperTools,
+# its LaunchDaemon, the adit group. In between it checks that a member of the group needs no
+# password, that tunnels set to start automatically come back by themselves when aditd restarts as
+# it does at boot, that installing again keeps the tunnels, and that uninstall leaves nothing
+# behind. Needs a Mac, Docker and sudo.
+#
+# With --keep it stops before uninstalling: adit stays installed with both test tunnels set to start
+# automatically, ready for a reboot. sudo adit uninstall --yes takes it off.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+source test/lib.sh
+
+keep=false
+[[ ${1:-} == --keep ]] && keep=true
+label=pro.saulo.adit
+if [[ -e /Library/LaunchDaemons/$label.plist ]]; then
+  fail "adit is already installed, and this test would replace it; uninstall it first"
+fi
+
+test/servers/up
+work=$(mktemp -d -t adit-install)
+go build -o "$work/aditd" ./cmd/aditd
+go build -o "$work/adit" ./cmd/adit
+go build -o "$work/adit-tray" ./cmd/adit-tray
+adit="$work/adit"
+unset ADIT_SOCKET
+
+echo "This installs adit for real: sudo asks for your password once."
+sudo -v
+cleanup() {
+  if ! $keep; then
+    sudo "$adit" uninstall --yes > /dev/null 2>&1 || true
+  fi
+  rm -rf "$work"
+}
+trap cleanup EXIT
+
+wait_up() {
+  for _ in $(seq 100); do
+    if "$adit" status "$1" --json 2> /dev/null | grep -q '"state": "up"'; then
+      echo "$1 is up"
+      return
+    fi
+    sleep 0.2
+  done
+  "$adit" status "$1" >&2 || true
+  fail "$1 did not come up by itself"
+}
+
+step "install needs root"
+expect 4 "$adit" install
+
+step "install"
+expect 0 sudo "$adit" install
+sudo launchctl print "system/$label" | grep -q 'state = running' || fail "launchd does not show aditd running"
+[[ $(stat -f '%Su %Lp' "/Library/PrivilegedHelperTools/$label") == "root 755" ]] || fail "aditd's binary is not root's"
+[[ $(stat -f '%Su:%Sg %Lp' /var/run/adit/aditd.sock) == "root:adit 660" ]] || fail "the socket is not root:adit 660"
+dseditgroup -o checkmember -m "$(id -un)" adit > /dev/null || fail "$(id -un) is not in the adit group"
+echo "aditd runs from a root-owned binary; its socket is root:adit 660; $(id -un) is in the adit group"
+[[ -e /Library/LaunchAgents/$label.tray.plist ]] || fail "the menu bar icon's LaunchAgent is missing"
+if launchctl print "gui/$(id -u)" > /dev/null 2>&1; then
+  for _ in $(seq 25); do
+    pgrep -x adit-tray > /dev/null && break
+    sleep 0.2
+  done
+  pgrep -x adit-tray > /dev/null || fail "the menu bar icon is not running"
+  echo "the menu bar icon is running, and starts at every login"
+else
+  echo "(no desktop session here, so the menu bar icon only starts at the next login)"
+fi
+
+step "you use adit without sudo, as a member of the group"
+expect 0 "$adit" version
+expect 0 "$adit" list
+
+step "import both test tunnels and set them to start automatically"
+for n in 1 2; do
+  expect 0 sudo "$adit" import "test/servers/out/test$n.conf"
+  expect 0 "$adit" autostart "test$n" on
+done
+
+step "aditd restarts as it does at boot, and brings both back by itself"
+sudo launchctl kickstart -k "system/$label"
+wait_up test1
+wait_up test2
+expect 0 ping -c 2 -t 5 10.99.1.1
+expect 0 ping -c 2 -t 5 10.99.2.1
+
+step "install again, as after an upgrade: the tunnels survive"
+expect 0 sudo "$adit" install
+wait_up test1
+wait_up test2
+
+step "allow and disallow another user"
+expect 0 sudo "$adit" allow nobody
+dseditgroup -o checkmember -m nobody adit > /dev/null || fail "nobody was not added"
+expect 0 sudo "$adit" disallow nobody
+if dseditgroup -o checkmember -m nobody adit > /dev/null; then
+  fail "nobody was not removed"
+fi
+
+if $keep; then
+  printf '\nadit stays installed, with test1 and test2 set to start automatically.\n'
+  printf 'Reboot, then check: %s status\nTake it off with: sudo %s uninstall --yes\n' "$adit" "$adit"
+  trap - EXIT
+  exit 0
+fi
+
+step "uninstall leaves nothing behind"
+interfaces=$(adit_interfaces "$adit")
+expect 0 sudo "$adit" uninstall --yes
+sleep 1
+if pgrep -x adit-tray > /dev/null; then
+  fail "the menu bar icon is still running"
+fi
+for path in "/Library/LaunchDaemons/$label.plist" "/Library/LaunchAgents/$label.tray.plist" "/Library/PrivilegedHelperTools/$label" \
+  "/etc/newsyslog.d/$label.conf" /var/log/aditd.log /var/db/adit /var/run/adit \
+  /etc/resolver/test1.adit.test /etc/resolver/test2.adit.test; do
+  [[ ! -e $path ]] || fail "$path was left behind"
+done
+if dscl . -read /Groups/adit > /dev/null 2>&1; then
+  fail "the adit group was left behind"
+fi
+if sudo launchctl print "system/$label" > /dev/null 2>&1; then
+  fail "launchd still knows aditd"
+fi
+for iface in $interfaces; do
+  if ifconfig -l | tr ' ' '\n' | grep -qx "$iface"; then
+    fail "$iface was left behind"
+  fi
+done
+expect 3 "$adit" list
+echo "nothing left: no LaunchDaemon, LaunchAgent, binary, log, store, socket, resolver file, group, icon or interface"
+
+printf '\nPASS\n'

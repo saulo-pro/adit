@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# Prints one version's section of CHANGELOG.md, without its heading: the notes of that version's
+# GitHub release. The release workflow publishes with it, and CI checks that every v* tag has one.
+# It fails, saying so, when the section is missing or empty, so a tag without one never ships.
+#
+#   scripts/release-notes 0.1.1    (v0.1.1 works too)
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+if [[ $# -ne 1 ]]; then
+  echo "usage: scripts/release-notes VERSION" >&2
+  exit 2
+fi
+version=${1#v}
+
+# From the line after "## [VERSION]" up to the next "## [" heading or the link definitions at the
+# bottom, without the blank lines at either end. Lines wrapped in the file are joined: a release page,
+# like a comment, breaks the line wherever the text does.
+notes=$(awk -v heading="## [$version]" '
+  index($0, "## [") == 1 { if (inside) exit; inside = index($0, heading) == 1; next }
+  inside && /^\[[^]]+\]: / { exit }
+  !inside { next }
+  /^[[:space:]]*$/ || /^#/ || /^- / || n == 0 || lines[n] ~ /^[[:space:]]*$/ || lines[n] ~ /^#/ { lines[++n] = $0; next }
+  { sub(/^[[:space:]]+/, ""); lines[n] = lines[n] " " $0 }
+  END {
+    first = 1; while (first <= n && lines[first] ~ /^[[:space:]]*$/) first++
+    last = n; while (last >= first && lines[last] ~ /^[[:space:]]*$/) last--
+    for (i = first; i <= last; i++) print lines[i]
+  }
+' CHANGELOG.md)
+
+if [[ -z $notes ]]; then
+  echo "CHANGELOG.md has no notes for $version: add a \"## [$version] - YYYY-MM-DD\" section" >&2
+  exit 1
+fi
+printf '%s\n' "$notes"

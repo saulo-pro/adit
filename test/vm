@@ -1,0 +1,122 @@
+#!/usr/bin/env bash
+# The brief's definition of done, run in a macOS virtual machine so that nothing waits for anyone:
+# the machine's sudo asks for no password, and it reboots to a real login window with nobody logged
+# in, which a Mac with FileVault never shows. Inside it (test/vm-guest does the work):
+#
+#   - adit installs, and two of its tunnels plus one of wg-quick's pass traffic together;
+#   - importing a .conf with PostUp warns and does not run it;
+#   - status --json gives handshake age and counters;
+#   - after a reboot, at the login window, both tunnels are back and pass traffic;
+#   - uninstall removes the service, the interfaces and the stored keys.
+#
+# adit goes in with docs/install.sh, as the landing page says: from a release built here, or, with
+# --release, from the latest release on GitHub through the very line the landing page shows.
+#
+# What it cannot do is click: the menu bar icon's one-click switch, and a tunnel of the WireGuard
+# app, are still checked on a real Mac with test/done, by a person but with no password.
+#
+#   test/vm             runs it all, then deletes the machine
+#   test/vm --release   installs with curl -fsSL https://adit.saulo.pro/install.sh | sh instead
+#   test/vm --keep      leaves the machine running afterwards and prints how to ssh in
+#
+# Needs tart, which mise puts in place, and, the first time, a 25 GB download of Cirrus Labs' macOS
+# image, kept as the machine adit-base for every later run (tart delete adit-base frees its 50 GB).
+set -euo pipefail
+cd "$(dirname "$0")/.."
+source test/lib.sh
+
+image=${ADIT_VM_IMAGE:-ghcr.io/cirruslabs/macos-tahoe-base:latest}
+base=adit-base
+vm=adit-done
+keep=false
+from=here
+for arg in "$@"; do
+  case $arg in
+    --keep) keep=true ;;
+    --release) from=release ;;
+    *) fail "usage: test/vm [--release] [--keep]" ;;
+  esac
+done
+
+tart=$(mise which tart) || fail "no tart: run mise install"
+go=$(mise which go) || fail "no go: run mise install"
+PATH="$(dirname "$go"):$PATH"
+export PATH
+work=$(mktemp -d -t adit-vm)
+running=""
+
+cleanup() {
+  if ! $keep; then
+    "$tart" stop "$vm" > /dev/null 2>&1 || true
+    "$tart" delete "$vm" > /dev/null 2>&1 || true
+    rm -rf "$work"
+  fi
+}
+trap cleanup EXIT
+
+step "build the test server, and a release of adit unless it comes from GitHub"
+mkdir -p "$work/adit/bin"
+(cd test/wgserver && go build -o "$work/adit/bin/wgserver" .)
+if [[ $from == here ]]; then
+  scripts/release-archive 0.0.0-vm "$work/adit/release"
+fi
+cp test/lib.sh test/vm-guest docs/install.sh "$work/adit/"
+
+step "a fresh machine"
+if ! "$tart" list --quiet | grep -qx "$base"; then
+  echo "first run: downloading $image (25 GB)"
+  "$tart" clone "$image" "$base"
+fi
+"$tart" stop "$vm" > /dev/null 2>&1 || true
+"$tart" delete "$vm" > /dev/null 2>&1 || true
+"$tart" clone "$base" "$vm"
+
+# start runs the machine, unless it already runs: a reboot inside it leaves tart running.
+start() {
+  if [[ -z $running ]] || ! kill -0 "$running" 2> /dev/null; then
+    "$tart" run --no-graphics "$vm" >> "$work/run.log" 2>&1 &
+    running=$!
+  fi
+}
+
+# guest runs a command in the machine over ssh. tart exec needs someone logged in; ssh works at the
+# login window too.
+guest() {
+  ssh -F /dev/null -i "$work/key" -o IdentitiesOnly=yes -o StrictHostKeyChecking=no \
+    -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=5 "$user@$address" "$@"
+}
+
+start
+for _ in $(seq 150); do
+  "$tart" exec "$vm" true > /dev/null 2>&1 && break
+  sleep 2
+done
+user=$("$tart" exec "$vm" id -un) || fail "the machine did not start: $(tail -3 "$work/run.log")"
+ssh-keygen -q -t ed25519 -N '' -C adit-vm -f "$work/key"
+"$tart" exec -i "$vm" sh -c 'mkdir -p ~/.ssh && chmod 700 ~/.ssh && cat >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys' < "$work/key.pub"
+address=$("$tart" ip --wait 60 "$vm")
+tar -C "$work" -cf - adit | guest 'rm -rf adit && tar -xf -'
+echo "$("$tart" exec "$vm" sw_vers -productVersion), user $user at $address"
+
+guest "ADIT_FROM=$from adit/vm-guest before-reboot"
+
+step "reboot"
+# ssh answers for a few seconds more while the machine shuts down, so its boot time tells.
+before=$(guest sysctl -n kern.boottime)
+guest 'sudo shutdown -r now' > /dev/null 2>&1 || true
+booted=""
+for _ in $(seq 90); do
+  start
+  booted=$(guest sysctl -n kern.boottime 2> /dev/null) && [[ $booted != "$before" ]] && break
+  sleep 2
+done
+[[ -n $booted && $booted != "$before" ]] || fail "the machine did not come back from the reboot"
+echo "rebooted"
+
+guest adit/vm-guest after-reboot
+
+if $keep; then
+  printf '\nThe machine %s keeps running. In: ssh -i %s %s@%s\nStop it: tart stop %s; tart delete %s\n' \
+    "$vm" "$work/key" "$user" "$address" "$vm" "$vm"
+fi
+printf '\nPASS: the definition of done holds, but for the clicks and the WireGuard app (test/done)\n'

@@ -1,0 +1,61 @@
+name: Release
+
+# A tag v<version> becomes a GitHub release holding adit for macOS, which docs/install.sh downloads:
+# adit-macos.tar.gz, with adit, aditd and adit-tray as universal binaries, and SHA256SUMS. Its notes
+# are the version's section of CHANGELOG.md; a tag without one stops here, before anything is built.
+# GitHub-hosted runners only: this repository is public.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v5
+      - name: Notes, from CHANGELOG.md
+        run: |
+          scripts/release-notes "$GITHUB_REF_NAME" > "$RUNNER_TEMP/notes.md"
+          cat "$RUNNER_TEMP/notes.md"
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - name: Test
+        run: go test ./...
+      - name: Build
+        run: scripts/release-archive "$GITHUB_REF_NAME" dist
+      - name: Both halves run, and say their version
+        run: |
+          mkdir dist/check
+          tar -xzf dist/adit-macos.tar.gz -C dist/check
+          archs=arm64
+          # The Intel half runs under Rosetta where the runner has it; otherwise it must at least be there.
+          if arch -x86_64 /usr/bin/true 2> /dev/null; then
+            archs="arm64 x86_64"
+          else
+            lipo -archs dist/check/aditd | grep -q x86_64
+          fi
+          for arch in $archs; do
+            arch -$arch dist/check/adit version | grep -q "adit ${GITHUB_REF_NAME#v}"
+            [ "$(arch -$arch dist/check/aditd -version)" = "${GITHUB_REF_NAME#v}" ]
+          done
+          rm -r dist/check
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # A version with a suffix (v0.2.0-rc.1) is a prerelease, so it never becomes the Latest
+          # release that install.sh downloads.
+          prerelease=false
+          [[ $GITHUB_REF_NAME == *-* ]] && prerelease=true
+          if gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; then
+            gh release edit "$GITHUB_REF_NAME" --notes-file "$RUNNER_TEMP/notes.md" --prerelease="$prerelease"
+          else
+            gh release create "$GITHUB_REF_NAME" --verify-tag --title "adit ${GITHUB_REF_NAME#v}" \
+              --notes-file "$RUNNER_TEMP/notes.md" --prerelease="$prerelease"
+          fi
+          gh release upload "$GITHUB_REF_NAME" dist/adit-macos.tar.gz dist/SHA256SUMS --clobber
