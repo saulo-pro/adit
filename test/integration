@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Brings real tunnels up against the Docker test servers and checks they pass traffic and leave
+# nothing behind. Needs a Mac, Docker and sudo: creating utun interfaces takes root.
+#
+# The test is compiled as you and only the compiled binary runs as root.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+test/servers/up
+
+binary=$(mktemp -t adit-integration)
+trap 'rm -f "$binary"' EXIT
+go test -c -tags integration -o "$binary" ./internal/server
+
+sudo ADIT_TEST_SERVERS="$PWD/test/servers/out" "$binary" -test.v -test.count=1 -test.run Integration

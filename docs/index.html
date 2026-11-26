@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>adit — several WireGuard tunnels at once</title>
+  <meta name="description" content="An open-source client for WireGuard tunnels on macOS that keeps several of them up at once, with a menu bar icon and a command line that do the same things.">
+  <style>
+    :root {
+      --bg: #fbfaf7;
+      --fg: #1d1d1f;
+      --muted: #5f5f66;
+      --line: #e4e2dc;
+      --card: #ffffff;
+      --accent: #2f6f5e;
+      --code: #f1efe9;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #141416;
+        --fg: #ececf0;
+        --muted: #a1a1aa;
+        --line: #2c2c31;
+        --card: #1b1b1f;
+        --accent: #6cc3a8;
+        --code: #222227;
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--fg);
+      font: 17px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, system-ui, sans-serif;
+    }
+    main { max-width: 860px; margin: 0 auto; padding: 0 16px 64px; }
+    header { padding: 72px 0 40px; border-bottom: 1px solid var(--line); }
+    h1 { font-size: 44px; line-height: 1.1; margin: 0 0 12px; letter-spacing: -0.02em; }
+    h1 span { color: var(--accent); }
+    .lead { font-size: 21px; color: var(--muted); margin: 0; max-width: 640px; }
+    h2 { font-size: 24px; margin: 48px 0 16px; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px; }
+    .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 18px; }
+    .card h3 { margin: 0 0 6px; font-size: 17px; }
+    .card p { margin: 0; color: var(--muted); font-size: 15px; }
+    pre {
+      background: var(--code); border: 1px solid var(--line); border-radius: 10px;
+      padding: 16px; overflow-x: auto; font-size: 14px; line-height: 1.5;
+    }
+    code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.9em; }
+    p code, li code, td code { overflow-wrap: anywhere; }
+    pre code { font-size: inherit; }
+    .note { color: var(--muted); font-size: 15px; }
+    ul { padding-left: 22px; }
+    li { margin-bottom: 8px; }
+    table { width: 100%; border-collapse: collapse; font-size: 15px; }
+    th, td { text-align: left; padding: 10px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+    th { color: var(--muted); font-weight: 600; }
+    a { color: var(--accent); }
+    footer { margin-top: 56px; padding-top: 20px; border-top: 1px solid var(--line); color: var(--muted); font-size: 14px; }
+    @media (max-width: 520px) { h1 { font-size: 34px; } .lead { font-size: 18px; } }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>adit — <span>several WireGuard tunnels, at once</span></h1>
+    <p class="lead">An open-source client for WireGuard® tunnels on macOS that keeps several of them up at once, with a menu bar icon and a command line that do the same things.</p>  </header>
+
+  <h2>Why it exists</h2>
+  <p>The official WireGuard app for macOS keeps one tunnel up at a time and has no command line. <code>wg-quick</code> runs several, but asks for the administrator password on every use and does not come back after a reboot. adit covers both.</p>
+
+  <h2>What it does</h2>
+  <div class="grid">
+    <div class="card"><h3>Several tunnels at once</h3><p>Each routes only its own networks. A tunnel whose networks or DNS domain overlap one that is up, adit's or another program's, is refused before it connects, with the reason.</p></div>
+    <div class="card"><h3>Menu bar and command line, one state</h3><p>Both talk to one privileged service, <code>aditd</code>, so a tunnel switched in one flips in the other at once.</p></div>
+    <div class="card"><h3>JSON for scripts and agents</h3><p>Every command answers in plain words, or in JSON with <code>--json</code>, with exit codes that mean something.</p></div>
+    <div class="card"><h3>Back after a reboot</h3><p>The tunnels you choose come up at boot, before anyone logs in, and follow network changes.</p></div>
+    <div class="card"><h3>No password for daily use</h3><p>The administrator password is asked once, at install. Switching tunnels needs none.</p></div>
+    <div class="card"><h3>DNS per tunnel</h3><p><code>DNS = 10.0.0.1, corp.example</code> sends names under <code>corp.example</code> to <code>10.0.0.1</code> and leaves every other name alone.</p></div>
+    <div class="card"><h3>Honest status</h3><p>The last handshake and the bytes each way, not just “connected”.</p></div>
+    <div class="card"><h3>Plain .conf files</h3><p>The same WireGuard files <code>wg-quick</code> and the official apps read, in and out. No lock-in.</p></div>
+    <div class="card"><h3>Other tunnels, read-only</h3><p>The WireGuard app's and <code>wg-quick</code>'s tunnels are shown, with <code>wg-quick</code>'s handshakes and counters. adit never changes them.</p></div>
+  </div>
+
+  <h2>Install</h2>
+  <p>With Homebrew:</p>
+  <pre><code>brew install saulo-pro/tap/adit
+sudo adit install</code></pre>
+  <p>Or with one line, without Homebrew:</p>
+  <pre><code>curl -fsSL https://adit.saulo.pro/install.sh | sh</code></pre>
+  <p>It downloads the latest release from GitHub, checks it against the release's <code>SHA256SUMS</code>, puts <code>adit</code>, <code>aditd</code> and <code>adit-tray</code> in <code>/usr/local/bin</code> and runs <code>sudo adit install</code>; sudo asks for your password once. <a href="install.sh">Read it</a> first if you like. Run it again to upgrade. It stops on a Mac where Homebrew installed adit, since the two copies would replace each other. To remove what it installed: <code>sudo adit uninstall</code>, then delete the three binaries from <code>/usr/local/bin</code>.</p>
+  <p><code>sudo adit install</code> copies <code>aditd</code> to <code>/Library/PrivilegedHelperTools/pro.saulo.adit</code>, where only root can change it, and starts it now and at every boot. It also sets the menu bar icon to start at every login, and creates the <code>adit</code> group with you in it. Run it again after every <code>brew upgrade adit</code>.</p>
+  <h2>Use</h2>
+  <pre><code>sudo adit import work.conf     # add a tunnel; hook lines are kept but never run
+adit up work                   # no password
+adit status                    # every tunnel, adit's and other software's
+adit status work --json
+adit autostart work on         # bring it up at boot
+adit down work
+sudo adit export work --output work.conf   # a new file, readable only by you
+sudo adit remove work
+sudo adit allow debora         # let another account switch tunnels
+sudo adit uninstall            # removes aditd, the group and every tunnel with its keys</code></pre>
+  <p class="note">Exit codes: 0 done; 1 failed, with the reason; 2 wrong usage; 3 <code>aditd</code> not reachable; 4 not allowed; 5 no such tunnel; 6 refused because of a conflict.</p>
+
+  <h2>Security</h2>
+  <ul>
+    <li><code>aditd</code> runs as root and only does tunnel work. It answers on a Unix socket that belongs to <code>root:adit</code> with mode <code>0660</code>, and also asks the kernel who each caller is. Members of the <code>adit</code> group may list, switch and watch tunnels. Adding, removing and exporting tunnels needs <code>sudo</code>, so a program running as you cannot slip in a tunnel or read the keys.</li>
+    <li><code>aditd</code> never runs a command or opens a path it was sent. Hook lines (<code>PreUp</code>, <code>PostUp</code>, <code>PreDown</code>, <code>PostDown</code>) are kept, so an export gives the file back unchanged, and never run.</li>
+    <li>Private keys stay in <code>/var/db/adit</code>, which only root can read, and never appear in output, logs or the menu. Export writes a new file only, readable only by you.</li>
+    <li>No telemetry, and no network traffic but the tunnels' own.</li>
+  </ul>
+
+  <h2>How it is built</h2>
+  <table>
+    <tr><th>Part</th><th>What it does</th></tr>
+    <tr><td><code>aditd</code></td><td>The root service, started at boot by a LaunchDaemon. It runs each tunnel with <a href="https://git.zx2c4.com/wireguard-go">wireguard-go</a> on its own <code>utun</code> interface and sets addresses and routes the way <code>wg-quick</code> does.</td></tr>
+    <tr><td><code>adit</code></td><td>The command line, a client of <code>aditd</code>'s socket.</td></tr>
+    <tr><td>Menu bar icon</td><td>Another client of the same socket.</td></tr>
+  </table>
+  <p>Written in Go, MIT licensed.</p>
+
+  <h2>Status</h2>
+  <p>0.1.2 is the current version. Full tunnels (<code>AllowedIPs = 0.0.0.0/0</code>) come in the next version: adit refuses them for now, saying so.</p>
+  <p>Read <a href="https://github.com/saulo-pro/adit/blob/main/docs/brief.md">the brief</a>, which says what adit must do, and <a href="https://github.com/saulo-pro/adit/blob/main/docs/decisions.md">the decisions</a>, which say why it is built this way, or <a href="https://github.com/saulo-pro/adit">the source on GitHub</a>.</p>
+
+  <footer>
+    MIT licensed. “WireGuard” and the “WireGuard” logo are registered trademarks of Jason A. Donenfeld. adit is an independent project, not affiliated with or endorsed by the WireGuard project.
+  </footer>
+</main>
+<!-- Cloudflare Web Analytics --><script type='module' src='https://static.cloudflareinsights.com/beacon.min.js' data-cf-beacon='{"token": "f665ea21a5de48a9a65beb09c424f82e"}'></script><!-- End Cloudflare Web Analytics -->
+</body>
+</html>

@@ -1,0 +1,4 @@
+[tools]
+go = "1.27.4"
+# test/vm's virtual machines; macOS only.
+tart = { version = "2.42.0", os = ["macos"] }

@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Stops the test servers and deletes their client files.
+set -euo pipefail
+cd "$(dirname "$0")"
+
+for pid in out/*.pid; do
+  [[ -f $pid ]] && kill "$(cat "$pid")" 2> /dev/null || true
+done
+# The Docker servers of earlier versions, if any are still running.
+if command -v docker > /dev/null; then
+  docker rm --force adit-test-1 adit-test-2 > /dev/null 2>&1 || true
+fi
+rm -rf out

@@ -1,0 +1,152 @@
+#!/usr/bin/env bash
+# The command line against a real aditd, as a person uses them. aditd runs as root on a scratch
+# socket and store, with your own primary group standing in for adit; adit runs as you, or under
+# sudo for the commands that need root. Needs a Mac, Docker and sudo.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+source test/lib.sh
+
+test/servers/up
+
+work=$(mktemp -d -t adit-e2e)
+go build -o "$work/aditd" ./cmd/aditd
+go build -o "$work/adit" ./cmd/adit
+adit="$work/adit"
+export ADIT_SOCKET="$work/aditd.sock"
+as_root=(sudo ADIT_SOCKET="$ADIT_SOCKET" "$adit")
+
+echo "aditd runs as root: sudo asks for your password once."
+sudo -v
+sudo "$work/aditd" -socket "$ADIT_SOCKET" -store "$work/store" -group "$(id -gn)" 2> "$work/aditd.log" &
+aditd=$!
+finish() {
+  sudo kill "$aditd" 2> /dev/null || true
+  wait "$aditd" 2> /dev/null || true
+  printf '\n--- aditd log\n'
+  cat "$work/aditd.log"
+  sudo rm -rf "$work"
+}
+trap finish EXIT
+for _ in $(seq 50); do
+  [[ -S $ADIT_SOCKET ]] && break
+  sleep 0.1
+done
+
+
+step "another program's tunnels are shown read-only, and adit does not cross them"
+# wg-quick brings test2's server up under its own name; its DNS line would change the whole Mac's DNS.
+grep -v '^DNS' test/servers/out/test2.conf > "$work/aditwq.conf"
+chmod 600 "$work/aditwq.conf"
+wg_quick=(sudo env PATH="$PATH" wg-quick)
+"${wg_quick[@]}" up "$work/aditwq.conf" 2> "$work/wg-quick.log" || {
+  cat "$work/wg-quick.log" >&2
+  fail "wg-quick could not bring aditwq up"
+}
+for _ in $(seq 25); do
+  "$adit" status aditwq --json 2> /dev/null | grep -q '"state": "up"' && break
+  sleep 0.2
+done
+expect 0 "$adit" status aditwq
+"$adit" list --json | grep -q '"source": "wg-quick"' || fail "adit list does not show wg-quick's tunnel"
+expect 1 "$adit" down aditwq
+expect 0 "${as_root[@]}" import test/servers/out/test2.conf
+expect 6 "$adit" up test2
+expect 0 "${as_root[@]}" remove test2
+app=$(scutil --nc list | awk -F'"' '/com\.wireguard\.macos/ && /\(Connected\)/ { print $2; exit }')
+if [[ -n $app ]]; then
+  expect 0 "$adit" status "$app"
+  expect 1 "$adit" down "$app"
+else
+  echo "(no tunnel is connected in the WireGuard app, so its read-only view is not checked)"
+fi
+"${wg_quick[@]}" down "$work/aditwq.conf" 2> /dev/null
+
+step "import without sudo is refused"
+expect 4 "$adit" import test/servers/out/test1.conf
+
+step "import with sudo"
+expect 0 "${as_root[@]}" import test/servers/out/test1.conf
+expect 0 "${as_root[@]}" import test/servers/out/test2.conf
+expect 0 "$adit" list
+
+step "both up at once, as you, with no password"
+expect 0 "$adit" up test1
+expect 0 "$adit" up test2
+expect 0 ping -c 3 -t 5 10.99.1.1
+expect 0 ping -c 3 -t 5 10.99.2.1
+expect 0 "$adit" status test1
+"$adit" status test2 --json | tee "$work/status.json"
+grep -q '"state": "up"' "$work/status.json"
+grep -q '"handshake_age_seconds": [0-9]' "$work/status.json"
+expect 0 "$adit" list
+
+step "each tunnel resolves its own domain through its own DNS server"
+for n in 1 2; do
+  resolver=/etc/resolver/test$n.adit.test
+  grep -q "^# Written by adit for the tunnel test$n;" "$resolver"
+  grep -q "^nameserver 10.99.$n.1$" "$resolver"
+  answer=""
+  for _ in $(seq 25); do
+    answer=$(dscacheutil -q host -a name "server.test$n.adit.test" | awk '/^ip_address:/ { print $2 }')
+    [[ -n $answer ]] && break
+    sleep 0.2
+  done
+  if [[ $answer != "10.99.$n.1" ]]; then
+    echo "FAIL: server.test$n.adit.test resolved to '$answer', want 10.99.$n.1" >&2
+    exit 1
+  fi
+  echo "server.test$n.adit.test is $answer, answered by test$n's DNS server through the tunnel"
+done
+
+step "a tunnel that overlaps one that is up is refused"
+sed -e 's#^AllowedIPs = .*#AllowedIPs = 10.99.1.128/25#' -e 's#^DNS = .*#DNS = 10.99.1.1, clash.adit.test#' \
+  test/servers/out/test1.conf > "$work/clash.conf"
+expect 0 "${as_root[@]}" import "$work/clash.conf"
+expect 6 "$adit" up clash
+expect 0 "${as_root[@]}" remove clash
+
+step "autostart"
+expect 0 "$adit" autostart test1 on
+expect 0 "$adit" autostart test1 off
+
+step "export gives the file back unchanged, to you"
+expect 4 "$adit" export test1 --output "$work/export.conf"
+expect 0 "${as_root[@]}" export test1 --output "$work/export.conf"
+owner=$(stat -f '%Su %Lp' "$work/export.conf")
+if [[ $owner != "$(id -un) 600" ]]; then
+  echo "FAIL: the exported file is $owner, want $(id -un) 600" >&2
+  exit 1
+fi
+cmp test/servers/out/test1.conf "$work/export.conf"
+
+step "down leaves nothing behind"
+interfaces=$(adit_interfaces "$adit")
+expect 0 "$adit" down test1
+expect 0 "$adit" down test2
+sleep 0.5
+for iface in $interfaces; do
+  if ifconfig -l | tr ' ' '\n' | grep -qx "$iface"; then
+    echo "FAIL: $iface was left behind" >&2
+    exit 1
+  fi
+  if netstat -rn | grep -qw "$iface"; then
+    echo "FAIL: routes on $iface were left behind" >&2
+    exit 1
+  fi
+done
+echo "no interface or route left on $(echo $interfaces)"
+for n in 1 2; do
+  if [[ -e /etc/resolver/test$n.adit.test ]]; then
+    echo "FAIL: /etc/resolver/test$n.adit.test was left behind" >&2
+    exit 1
+  fi
+done
+echo "no resolver file left behind"
+
+step "remove"
+expect 4 "$adit" remove test1
+expect 0 "${as_root[@]}" remove test1
+expect 0 "${as_root[@]}" remove test2
+expect 5 "$adit" status test1
+
+printf '\nPASS\n'

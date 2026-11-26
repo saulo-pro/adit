@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# Builds a release of adit for macOS: adit, aditd and adit-tray as universal binaries, for Apple
+# silicon and Intel Macs on macOS 13 or later, with the licence, packed in DIR/adit-macos.tar.gz, and
+# its checksum in DIR/SHA256SUMS. The release workflow attaches both to the GitHub release, where
+# docs/install.sh downloads them; test/installer and test/vm install from them too.
+#
+#   scripts/release-archive VERSION [DIR]    DIR is dist unless given
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+if [[ $# -lt 1 ]]; then
+  echo "usage: scripts/release-archive VERSION [DIR]" >&2
+  exit 2
+fi
+version=${1#v}
+dist=${2:-dist}
+if [[ $(uname -s) != Darwin ]]; then
+  echo "it builds on a Mac only: the menu bar icon needs cgo, and lipo joins the two halves" >&2
+  exit 1
+fi
+
+work=$(mktemp -d -t adit-release)
+trap 'rm -rf "$work"' EXIT
+
+export CGO_ENABLED=1 GOOS=darwin MACOSX_DEPLOYMENT_TARGET=13.0
+for arch in arm64 amd64; do
+  machine=$arch
+  [[ $arch == amd64 ]] && machine=x86_64
+  for cmd in adit aditd adit-tray; do
+    GOARCH=$arch CC="clang -arch $machine" go build -trimpath \
+      -ldflags "-s -w -X main.version=$version" -o "$work/$arch/$cmd" "./cmd/$cmd"
+  done
+done
+
+mkdir -p "$work/adit" "$dist"
+for cmd in adit aditd adit-tray; do
+  lipo -create -output "$work/adit/$cmd" "$work/arm64/$cmd" "$work/amd64/$cmd"
+done
+cp LICENSE "$work/adit/"
+# No ._ files, extended attributes or the builder's name: only what the four files hold.
+COPYFILE_DISABLE=1 tar --no-mac-metadata --uid 0 --gid 0 --uname root --gname wheel \
+  -C "$work/adit" -czf "$dist/adit-macos.tar.gz" adit aditd adit-tray LICENSE
+(cd "$dist" && shasum -a 256 adit-macos.tar.gz > SHA256SUMS)
+
+echo "adit $version for macOS: $dist/adit-macos.tar.gz ($(du -h "$dist/adit-macos.tar.gz" | cut -f1 | tr -d ' ')) and $dist/SHA256SUMS"

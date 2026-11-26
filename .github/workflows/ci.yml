@@ -1,0 +1,76 @@
+name: CI
+
+# GitHub-hosted runners only: this repository is public, so a pull request from a fork must never
+# reach a self-hosted machine.
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-26, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - name: Formatted
+        run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+      # Each machine vets its own system (the menu bar icon needs cgo, which does not cross-compile
+      # to macOS), plus Windows, which needs no cgo.
+      - name: Vet, for this system and Windows
+        run: |
+          go vet ./...
+          GOOS=windows go vet ./...
+      - name: Test
+        run: go test -race ./...
+      - name: Build
+        run: go build ./cmd/...
+
+  # Every release tag has its notes in CHANGELOG.md, which the release workflow publishes; a missing
+  # section is caught here, on push, rather than when a tag is pushed.
+  changelog:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: A section for every v* tag
+        run: |
+          for tag in $(git tag --list 'v*'); do
+            scripts/release-notes "$tag" > /dev/null
+            echo "$tag has its notes"
+          done
+      - name: A version without a section fails
+        run: "! scripts/release-notes 0.0.0"
+
+  # The tests that need root: real utun interfaces, routes, /etc/resolver, a LaunchDaemon and the adit
+  # group. GitHub's macOS machines give passwordless sudo, so they run on every push without anyone
+  # typing a password; the WireGuard servers they talk to run in user space (test/wgserver).
+  root:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - name: wg-quick, for the read-only view of other software's tunnels
+        run: brew install wireguard-tools
+      - name: The test servers' own test
+        run: cd test/wgserver && go test ./...
+      - name: Tunnel manager through its socket
+        run: test/integration
+      - name: aditd as root, adit as the user
+        run: test/e2e
+      - name: Install, autostart after a restart, uninstall
+        run: test/install
+      - name: install.sh, from a release built here
+        run: test/installer

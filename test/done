@@ -1,0 +1,290 @@
+#!/usr/bin/env bash
+# The brief's definition of done for the first macOS version, run on a real Mac:
+#
+#   - two adit tunnels plus one of the official app's all pass traffic;
+#   - both come back after a reboot, before login;
+#   - the menu bar icon switches each with one click and no password;
+#   - the command line does the same, and status --json gives handshake age and counters;
+#   - importing a .conf with PostUp warns and does not run it;
+#   - uninstall removes the service, the interfaces and the stored keys.
+#
+# The two adit tunnels are a real one, from FILE, and adit's own test server, which a temporary
+# LaunchDaemon starts at boot, as a real server would be up, and which keeps its keys across the
+# reboot.
+#
+# With FileVault on, a Mac logs its owner in as soon as the disk is unlocked at startup, so there is
+# no time "before login" after a reboot to measure. What "before login" asks for, tunnels that need
+# no one logged in, is shown instead by logging out: the tunnels must stay up and passing traffic
+# while the login window waits.
+#
+#   test/done before-reboot FILE APP-ADDRESS
+#       FILE is a real WireGuard file with split routes; APP-ADDRESS answers ping through the tunnel
+#       connected in the WireGuard app.
+#   (restart the Mac; once logged in, log out, wait two minutes at the login window, log back in)
+#   test/done after-reboot
+#       checks the reboot and the logged-out minutes, then uninstalls. One password.
+#
+# Uses the adit on PATH: install it with Homebrew first.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+source test/lib.sh
+
+state="$HOME/.cache/adit-done"
+server_dir="$HOME/.cache/adit-done-server"
+server_label=pro.saulo.adit.testserver
+server_plist=/Library/LaunchDaemons/$server_label.plist
+mkdir -p "$(dirname "$state")"
+
+pings() {
+  local address=$1 through=$2
+  ping -c 3 -t 5 "$address" > /dev/null || fail "$address does not answer through $through"
+  echo "$address answers through $through"
+}
+
+wait_up() {
+  for _ in $(seq 150); do
+    adit status "$1" --json 2> /dev/null | grep -q '"state": "up"' && return
+    sleep 0.2
+  done
+  adit status "$1" >&2 || true
+  fail "$1 is not up"
+}
+
+# traffic NAME FILE [ADDRESS]: shows packets pass through a tunnel both ways, by ping when an
+# address is given, or else by a fresh handshake: WireGuard handshakes only when there is something
+# to send, so a ping into the tunnel's first network starts one, answered or not.
+traffic() {
+  local name=$1 file=$2 address=${3:-}
+  if [[ -n $address ]]; then
+    pings "$address" "$name"
+    return
+  fi
+  local first target
+  first=$(grep -m1 -i '^AllowedIPs' "$file" | cut -d= -f2 | cut -d, -f1 | tr -d ' ')
+  target=$(python3 -c 'import ipaddress, sys; print(next(ipaddress.ip_network(sys.argv[1], strict=False).hosts()))' "$first")
+  ping -c 2 -t 3 "$target" > /dev/null 2>&1 || true
+  wait_up "$name"
+  echo "$name handshook with its server: packets went both ways"
+}
+
+# start_server runs adit's test server from a LaunchDaemon, as you, from boot on.
+start_server() {
+  mkdir -p "$server_dir"
+  chmod 700 "$server_dir"
+  (cd test/wgserver && go build -o "$server_dir/wgserver" .)
+  rm -f "$server_dir/boottest.conf"
+  sudo tee "$server_plist" > /dev/null << EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>$server_label</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>$server_dir/wgserver</string>
+    <string>-name</string><string>boottest</string>
+    <string>-address</string><string>10.99.3.1</string>
+    <string>-port</string><string>51823</string>
+    <string>-out</string><string>$server_dir</string>
+    <string>-keys</string><string>$server_dir</string>
+  </array>
+  <key>UserName</key>
+  <string>$(id -un)</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+</dict>
+</plist>
+EOF
+  sudo chown root:wheel "$server_plist"
+  sudo chmod 644 "$server_plist"
+  sudo launchctl bootout "system/$server_label" 2> /dev/null || true
+  sudo launchctl bootstrap system "$server_plist"
+  for _ in $(seq 50); do
+    [[ -s $server_dir/boottest.conf ]] && return
+    sleep 0.1
+  done
+  fail "the test server did not start"
+}
+
+stop_server() {
+  sudo launchctl bootout "system/$server_label" 2> /dev/null || true
+  sudo rm -f "$server_plist"
+  rm -rf "$server_dir"
+}
+
+before_reboot() {
+  [[ $# == 2 ]] || fail "usage: test/done before-reboot FILE APP-ADDRESS"
+  local real=$1 app=$2
+  [[ -f $real ]] || fail "$real is not a file"
+  command -v adit > /dev/null || fail "no adit on PATH: brew install saulo-pro/tap/adit"
+  scutil --nc list | grep 'com.wireguard.macos' | grep -q '(Connected)' ||
+    fail "connect a tunnel in the WireGuard app first"
+
+  echo "sudo asks for your password once."
+  sudo -v
+  step "install"
+  expect 0 sudo adit install
+
+  step "importing a file with PostUp warns, and bringing it up does not run it"
+  local hooked marker="/tmp/adit-done-postup-ran"
+  hooked=$(mktemp -t adit-hooked).conf
+  grep -v '^PostUp' "$real" | sed "/^\[Interface\]/a\\
+PostUp = touch $marker
+" > "$hooked"
+  rm -f "$marker"
+  sudo adit import "$hooked" --name hooktest 2> "$hooked.err"
+  grep -q "PostUp line kept but not run" "$hooked.err" || fail "no PostUp warning on import"
+  cat "$hooked.err"
+  expect 0 adit up hooktest
+  expect 0 adit down hooktest
+  [[ ! -e $marker ]] || fail "the PostUp line ran"
+  echo "the PostUp line was kept and never ran"
+  expect 0 sudo adit remove hooktest
+  rm -f "$hooked" "$hooked.err"
+
+  step "two adit tunnels and the app's tunnel pass traffic together"
+  start_server
+  local names files addresses
+  names=("$(basename "${real%.*}")" boottest)
+  files=("$real" "$server_dir/boottest.conf")
+  addresses=("" 10.99.3.1)
+  for n in 0 1; do
+    expect 0 sudo adit import "${files[$n]}" --name "${names[$n]}"
+    expect 0 adit up "${names[$n]}"
+  done
+  for n in 0 1; do
+    traffic "${names[$n]}" "${files[$n]}" "${addresses[$n]}"
+  done
+  pings "$app" "the WireGuard app's tunnel"
+  adit list
+
+  step "status --json gives handshake age and counters"
+  for name in "${names[@]}"; do
+    local json
+    json=$(adit status "$name" --json)
+    for key in '"handshake_age_seconds": [0-9]' '"received_bytes": [1-9]' '"sent_bytes": [1-9]'; do
+      grep -q "$key" <<< "$json" || fail "$name's status lacks $key"
+    done
+  done
+  echo "both report handshake age and bytes each way"
+
+  printf '%s\n' "${names[@]}" "${files[@]}" "${addresses[0]:--}" "${addresses[1]}" "$app" > "$state"
+  clicks
+}
+
+wait_down() {
+  for _ in $(seq 50); do
+    adit status "$1" --json 2> /dev/null | grep -q '"state": "down"' && return
+    sleep 0.2
+  done
+  fail "$1 is not down: the click did not reach aditd (sudo grep command= /var/log/aditd.log shows the clicks)"
+}
+
+# clicks is the part a person does with the menu bar icon; test/done clicks runs it again alone.
+clicks() {
+  [[ -f $state ]] || fail "run test/done before-reboot first"
+  local names=()
+  while IFS= read -r line; do names+=("$line"); done < <(head -2 "$state")
+
+  step "the menu bar icon switches each tunnel with one click, and no password"
+  for name in "${names[@]}"; do
+    read -rp "Click $name in adit's menu bar menu to take it down, then press Enter here: "
+    wait_down "$name"
+    read -rp "Click $name again to bring it up, then press Enter: "
+    wait_up "$name"
+    echo "$name went down and came back up from the menu"
+  done
+
+  step "both are set to come back at boot"
+  for name in "${names[@]}"; do
+    expect 0 adit autostart "$name" on
+  done
+
+  printf '\nPart one passed. Now restart the Mac. Once logged in, log out, wait two minutes at the\n'
+  printf 'login window, log back in, and run:\n  test/done after-reboot\n'
+}
+
+# stamp turns one of aditd's log times, such as 2026-11-25T01:44:12.345+01:00, into seconds.
+stamp() {
+  date -j -f "%Y-%m-%dT%H:%M:%S" "${1%%.*}" +%s
+}
+
+after_reboot() {
+  [[ -f $state ]] || fail "run test/done before-reboot first"
+  local lines=()
+  while IFS= read -r line; do lines+=("$line"); done < "$state"
+  local names=("${lines[0]}" "${lines[1]}") files=("${lines[2]}" "${lines[3]}") app=${lines[6]}
+  local addresses=("${lines[4]#-}" "${lines[5]}")
+
+  local boot
+  boot=$(sysctl -n kern.boottime | sed -E 's/^\{ sec = ([0-9]+),.*/\1/')
+  # The logged-out minutes: the end of the console session before this one, and the start of this one.
+  local sessions logout login
+  sessions=$(last console | head -2)
+  login=$(date -j -f "%b %d %H:%M" "$(awk 'NR == 1 { print $4, $5, $6 }' <<< "$sessions")" +%s)
+  logout=$(awk 'NR == 2 && $7 == "-" { print $4, $5, $8 }' <<< "$sessions")
+  [[ -n $logout ]] || fail "no log-out since the restart: log out, wait two minutes, log back in, run again"
+  logout=$(date -j -f "%b %d %H:%M" "$logout" +%s)
+  ((logout >= boot)) || fail "no log-out since the restart: log out, wait two minutes, log back in, run again"
+  echo "booted at $(date -r "$boot" +%T); nobody was logged in from $(date -r "$logout" +%H:%M) to $(date -r "$login" +%H:%M)"
+
+  step "both came back by themselves after the reboot, and stayed up while nobody was logged in"
+  for n in 0 1; do
+    local name=${names[$n]} up="" down=""
+    while IFS= read -r line; do
+      local at
+      at=$(stamp "$(sed -E 's/^time=([^ ]+) .*/\1/' <<< "$line")")
+      ((at >= boot)) || continue
+      if [[ $line == *'msg="tunnel up"'* ]]; then
+        [[ -n $up ]] || up=$at
+      else
+        down=$at
+      fi
+    done < <(grep -E "msg=\"tunnel (up|down)\" tunnel=$name( |$)" /var/log/aditd.log)
+    [[ -n $up ]] || fail "aditd's log shows $name not coming up after this boot"
+    [[ -z $down ]] || fail "$name went down at $(date -r "$down" +%T)"
+    ((up < logout)) || fail "$name came up at $(date -r "$up" +%T), after the log-out"
+    echo "$name came up at $(date -r "$up" +%T), $((up - boot)) s after boot, and has not gone down since"
+    traffic "$name" "${files[$n]}" "${addresses[$n]}"
+  done
+  pings "$app" "the WireGuard app's tunnel"
+  printf '\nPart two passed.\n'
+  uninstall
+}
+
+uninstall() {
+  [[ -f $state ]] || fail "run test/done before-reboot first"
+  local interfaces
+  interfaces=$(adit_interfaces adit)
+
+  step "uninstall removes the service, the interfaces and the stored keys"
+  echo "sudo asks for your password."
+  expect 0 sudo adit uninstall --yes
+  stop_server
+  if sudo launchctl print system/pro.saulo.adit > /dev/null 2>&1; then
+    fail "the service is still loaded"
+  fi
+  for path in /Library/LaunchDaemons/pro.saulo.adit.plist /Library/PrivilegedHelperTools/pro.saulo.adit /var/db/adit; do
+    [[ ! -e $path ]] || fail "$path is still there"
+  done
+  for iface in $interfaces; do
+    if ifconfig -l | tr ' ' '\n' | grep -qx "$iface"; then
+      fail "$iface is still there"
+    fi
+  done
+  echo "the service, the interfaces and the stored keys are gone"
+  rm -f "$state"
+  echo "(sudo adit install sets adit up again, to keep using it)"
+  printf '\nThe definition of done holds.\n'
+}
+
+case ${1:-} in
+before-reboot) shift && before_reboot "$@" ;;
+clicks) clicks ;;
+after-reboot) after_reboot ;;
+uninstall) uninstall ;;
+*) fail "usage: test/done before-reboot FILE APP-ADDRESS | after-reboot | uninstall" ;;
+esac

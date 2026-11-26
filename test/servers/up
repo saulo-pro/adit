@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# Starts two WireGuard test servers, on 127.0.0.1:51821 and :51822, answering ping and DNS at
+# 10.99.1.1 and 10.99.2.1 (for test1.adit.test and test2.adit.test), and writes their client files
+# to test/servers/out/. They run in user space (test/wgserver): no root, no Docker, nothing on the
+# Mac's own network.
+set -euo pipefail
+cd "$(dirname "$0")"
+
+./down
+mkdir -p out
+(cd ../wgserver && go build -o ../servers/out/wgserver .)
+
+for n in 1 2; do
+  nohup out/wgserver -name "test$n" -address "10.99.$n.1" -port "5182$n" -out out > "out/test$n.log" 2>&1 &
+  echo $! > "out/test$n.pid"
+done
+
+for n in 1 2; do
+  for _ in $(seq 50); do
+    [[ -s "out/test$n.conf" ]] && break
+    sleep 0.1
+  done
+  if [[ ! -s "out/test$n.conf" ]]; then
+    echo "test server $n did not start:" >&2
+    cat "out/test$n.log" >&2
+    exit 1
+  fi
+done
+
+echo "Test servers up on 10.99.1.1 and 10.99.2.1; client files in $PWD/out/"
