@@ -12,7 +12,7 @@ label=pro.saulo.adit
 bin=/usr/local/bin
 version=0.0.0-installer
 sudo -n true 2> /dev/null || fail "sudo asks for a password here; this runs only where it does not"
-if [[ -e /Library/LaunchDaemons/$label.plist || -e $bin/adit ]]; then
+if [[ -e /Library/LaunchDaemons/$label.plist || -e $bin/adit || -e /var/db/adit ]]; then
   fail "adit is already installed here, and this test would replace it"
 fi
 

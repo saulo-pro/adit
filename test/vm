@@ -25,7 +25,8 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 source test/lib.sh
 
-image=${ADIT_VM_IMAGE:-ghcr.io/cirruslabs/macos-tahoe-base:latest}
+# By digest, not by the tag latest, so the image cannot change under the test.
+image=${ADIT_VM_IMAGE:-ghcr.io/cirruslabs/macos-tahoe-base@sha256:65c3133a633fda8753cf1f71f2d55727792d534a2125b0032466563dcc8e58fd}
 base=adit-base
 vm=adit-done
 keep=false
@@ -81,9 +82,10 @@ start() {
 
 # guest runs a command in the machine over ssh. tart exec needs someone logged in; ssh works at the
 # login window too.
+# The guest's host key is read through tart exec at the start and pinned.
 guest() {
-  ssh -F /dev/null -i "$work/key" -o IdentitiesOnly=yes -o StrictHostKeyChecking=no \
-    -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=5 "$user@$address" "$@"
+  ssh -F /dev/null -i "$work/key" -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
+    -o UserKnownHostsFile="$work/known_hosts" -o LogLevel=ERROR -o ConnectTimeout=5 -l "$user" "$address" "$@"
 }
 
 start
@@ -92,9 +94,16 @@ for _ in $(seq 150); do
   sleep 2
 done
 user=$("$tart" exec "$vm" id -un) || fail "the machine did not start: $(tail -3 "$work/run.log")"
+[[ $user =~ ^[a-z_][a-z0-9._-]*$ ]] || fail "the machine reports an unexpected user name"
 ssh-keygen -q -t ed25519 -N '' -C adit-vm -f "$work/key"
 "$tart" exec -i "$vm" sh -c 'mkdir -p ~/.ssh && chmod 700 ~/.ssh && cat >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys' < "$work/key.pub"
+# The image's account has a well-known password, and the machine sits on a shared network: from
+# here on, only the key gets in.
+"$tart" exec "$vm" sudo sh -c 'printf "PasswordAuthentication no\nKbdInteractiveAuthentication no\n" > /etc/ssh/sshd_config.d/000-adit-test.conf'
 address=$("$tart" ip --wait 60 "$vm")
+[[ $address =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || fail "the machine reports an unexpected address"
+host_key=$("$tart" exec "$vm" cat /etc/ssh/ssh_host_ed25519_key.pub) || fail "could not read the machine's host key"
+printf '%s %s\n' "$address" "$host_key" > "$work/known_hosts"
 tar -C "$work" -cf - adit | guest 'rm -rf adit && tar -xf -'
 echo "$("$tart" exec "$vm" sw_vers -productVersion), user $user at $address"
 
@@ -116,7 +125,7 @@ echo "rebooted"
 guest adit/vm-guest after-reboot
 
 if $keep; then
-  printf '\nThe machine %s keeps running. In: ssh -i %s %s@%s\nStop it: tart stop %s; tart delete %s\n' \
+  printf '\nThe machine %s keeps running, reachable on the local network with its key only. In: ssh -i %s %s@%s\nStop it: tart stop %s; tart delete %s\n' \
     "$vm" "$work/key" "$user" "$address" "$vm" "$vm"
 fi
 printf '\nPASS: the definition of done holds, but for the clicks and the WireGuard app (test/done)\n'

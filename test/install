@@ -29,6 +29,7 @@ unset ADIT_SOCKET
 echo "This installs adit for real: sudo asks for your password once."
 sudo -v
 cleanup() {
+  test/servers/down || true
   if ! $keep; then
     sudo "$adit" uninstall --yes > /dev/null 2>&1 || true
   fi

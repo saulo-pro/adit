@@ -3,6 +3,9 @@
 // DNS at its tunnel address without touching the Mac's own network: a packet reaches it only through
 // the tunnel.
 //
+// Its UDP port listens on every interface (wireguard-go's default bind) but answers only the one
+// client key it made; nothing else of it is reachable from the network.
+//
 // It makes fresh keys on every start, or keeps them in -keys DIR across restarts (a server that comes
 // back after a reboot), and writes the matching client file to OUT/NAME.conf, ready for adit to
 // import, then serves until it is stopped.

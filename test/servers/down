@@ -3,8 +3,13 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
+# Only a process that is still one of these servers: a pid file may outlive its process, and the
+# number go to something else.
 for pid in out/*.pid; do
-  [[ -f $pid ]] && kill "$(cat "$pid")" 2> /dev/null || true
+  [[ -f $pid ]] || continue
+  if ps -p "$(cat "$pid")" -o command= 2> /dev/null | grep -q 'out/wgserver'; then
+    kill "$(cat "$pid")" 2> /dev/null || true
+  fi
 done
 # The Docker servers of earlier versions, if any are still running.
 if command -v docker > /dev/null; then
