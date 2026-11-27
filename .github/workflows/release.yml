@@ -4,28 +4,44 @@ name: Release
 # adit-macos.tar.gz, with adit, aditd and adit-tray as universal binaries, and SHA256SUMS. Its notes
 # are the version's section of CHANGELOG.md; a tag without one stops here, before anything is built.
 # GitHub-hosted runners only: this repository is public.
+#
+# Two jobs, so the code that builds never holds a token that can publish:
+#   build    reads the repository, builds with no cache from earlier runs (every module checked
+#            against go.sum), attests the archive's provenance and hands it over as an artifact;
+#   publish  writes the release, in the "release" environment, from that artifact alone.
+# Every action is pinned to a commit; the comment says which version it is.
 
 on:
   push:
     tags: ["v*"]
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  release:
+  build:
     runs-on: macos-26
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
       - name: Notes, from CHANGELOG.md
         run: |
-          scripts/release-notes "$GITHUB_REF_NAME" > "$RUNNER_TEMP/notes.md"
-          cat "$RUNNER_TEMP/notes.md"
-      - uses: actions/setup-go@v6
+          mkdir dist
+          scripts/release-notes "$GITHUB_REF_NAME" > dist/notes.md
+          cat dist/notes.md
+      # No cache: CI jobs on main write the shared module and build caches, and go build trusts a
+      # module directory that is already unpacked. A cold build takes about a minute more.
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version-file: go.mod
-      - name: Test
-        run: go test ./...
+          cache: false
+      - name: Every module matches go.sum
+        run: go mod download && go mod verify
       - name: Build
         run: scripts/release-archive "$GITHUB_REF_NAME" dist
       - name: Both halves run, and say their version
@@ -44,18 +60,43 @@ jobs:
             [ "$(arch -$arch dist/check/aditd -version)" = "${GITHUB_REF_NAME#v}" ]
           done
           rm -r dist/check
+      - uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
+        with:
+          subject-path: dist/adit-macos.tar.gz
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release
+          path: |
+            dist/adit-macos.tar.gz
+            dist/SHA256SUMS
+            dist/notes.md
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release
+          path: dist
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
         run: |
           # A version with a suffix (v0.2.0-rc.1) is a prerelease, so it never becomes the Latest
           # release that install.sh downloads.
           prerelease=false
-          [[ $GITHUB_REF_NAME == *-* ]] && prerelease=true
-          if gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; then
-            gh release edit "$GITHUB_REF_NAME" --notes-file "$RUNNER_TEMP/notes.md" --prerelease="$prerelease"
+          [[ $TAG == *-* ]] && prerelease=true
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release edit "$TAG" --notes-file dist/notes.md --prerelease="$prerelease"
           else
-            gh release create "$GITHUB_REF_NAME" --verify-tag --title "adit ${GITHUB_REF_NAME#v}" \
-              --notes-file "$RUNNER_TEMP/notes.md" --prerelease="$prerelease"
+            gh release create "$TAG" --verify-tag --title "adit ${TAG#v}" \
+              --notes-file dist/notes.md --prerelease="$prerelease"
           fi
-          gh release upload "$GITHUB_REF_NAME" dist/adit-macos.tar.gz dist/SHA256SUMS --clobber
+          gh release upload "$TAG" dist/adit-macos.tar.gz dist/SHA256SUMS --clobber

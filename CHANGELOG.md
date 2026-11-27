@@ -7,6 +7,14 @@ notes of its GitHub release.
 
 ## [Unreleased]
 
+### Security
+
+- Releases are built with no cache from earlier CI runs, with every module checked against `go.sum`,
+  in a job that cannot publish; each archive carries a build provenance attestation, which
+  `gh attestation verify adit-macos.tar.gz --repo saulo-pro/adit` checks.
+- `golang.org/x/crypto`, `x/net` and `x/sys` are up to date, and CI checks for known
+  vulnerabilities on every push.
+
 ### Changed
 
 - An `Address` or `AllowedIPs` entry that is not an IP address is now explained with the example
