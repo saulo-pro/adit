@@ -112,3 +112,12 @@ func TestDescribe(t *testing.T) {
 		}
 	}
 }
+
+func TestOtherProgramsNamesArePrintable(t *testing.T) {
+	if got := printable("bad\x1b]0;title\x07name‮"); got != "bad]0;titlename" {
+		t.Errorf("got %q", got)
+	}
+	if got := printable(strings.Repeat("x", 100)); len([]rune(got)) != 65 {
+		t.Errorf("not cut: %d runes", len([]rune(got)))
+	}
+}

@@ -106,10 +106,15 @@ func (e *Error) Error() string {
 	return e.Message
 }
 
-// Client talks to aditd.
+// Client talks to aditd. With RootPeer, it talks only to a socket served by root: adit sets it
+// under sudo, so a socket named in the environment cannot collect an imported file or answer an
+// export.
 type Client struct {
-	Socket string
+	Socket   string
+	RootPeer bool
 }
+
+var errNotUnix = errors.New("not a Unix socket")
 
 // Do sends one request and returns its response, or an *Error.
 func (c *Client) Do(ctx context.Context, req Request) (*Response, error) {
@@ -179,6 +184,12 @@ func (c *Client) dial(ctx context.Context) (net.Conn, error) {
 		return nil, &Error{CodeNotAllowed, "you may not use adit: you are not in the adit group; an administrator can add you with sudo adit allow " + currentUser()}
 	case err != nil:
 		return nil, &Error{CodeUnreachable, "aditd is not running or not installed; install it with sudo adit install"}
+	}
+	if c.RootPeer {
+		if uid, err := peerUID(conn); err != nil || uid != 0 {
+			conn.Close()
+			return nil, &Error{CodeFailed, "the program answering on " + socket + " is not root's aditd, so adit will not talk to it"}
+		}
 	}
 	return conn, nil
 }

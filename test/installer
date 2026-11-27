@@ -12,7 +12,7 @@ label=pro.saulo.adit
 bin=/usr/local/bin
 version=0.0.0-installer
 sudo -n true 2> /dev/null || fail "sudo asks for a password here; this runs only where it does not"
-if [[ -e /Library/LaunchDaemons/$label.plist || -e $bin/adit ]]; then
+if [[ -e /Library/LaunchDaemons/$label.plist || -e $bin/adit || -e /var/db/adit ]]; then
   fail "adit is already installed here, and this test would replace it"
 fi
 
@@ -28,15 +28,17 @@ trap cleanup EXIT
 
 step "a release, built here"
 scripts/release-archive "$version" "$work/release"
+local_installer "$work/release" "$work/install.sh"
 
 step "a download that does not match SHA256SUMS installs nothing"
 mkdir "$work/tampered"
 cp "$work/release/adit-macos.tar.gz" "$work/tampered/"
 printf '%064d  adit-macos.tar.gz\n' 0 > "$work/tampered/SHA256SUMS"
-if ADIT_DOWNLOAD="file://$work/tampered" sh docs/install.sh 2> "$work/tampered.err"; then
+local_installer "$work/tampered" "$work/install-tampered.sh"
+if sh "$work/install-tampered.sh" 2> "$work/tampered.err"; then
   fail "the installer accepted a checksum that does not match"
 fi
-grep -q "does not match the release's SHA256SUMS" "$work/tampered.err" || fail "unexpected error: $(cat "$work/tampered.err")"
+grep -q "does not match the release's SHA256SUMS\|no checksum for adit-macos.tar.gz" "$work/tampered.err" || fail "unexpected error: $(cat "$work/tampered.err")"
 [[ ! -e $bin/adit ]] || fail "$bin/adit was installed anyway"
 echo "refused: $(cat "$work/tampered.err")"
 
@@ -44,7 +46,7 @@ step "a Mac where Homebrew installed adit is refused"
 mkdir -p "$work/shim" "$work/homebrew/Cellar/adit"
 printf '#!/bin/sh\necho %s\n' "$work/homebrew" > "$work/shim/brew"
 chmod +x "$work/shim/brew"
-if PATH="$work/shim:$PATH" ADIT_DOWNLOAD="file://$work/release" sh docs/install.sh 2> "$work/brew.err"; then
+if PATH="$work/shim:$PATH" sh "$work/install.sh" 2> "$work/brew.err"; then
   fail "the installer went ahead beside Homebrew's adit"
 fi
 grep -q "Homebrew installed adit here" "$work/brew.err" || fail "unexpected error: $(cat "$work/brew.err")"
@@ -55,13 +57,13 @@ step "a download cut short runs nothing"
 # curl | sh runs what has arrived so far; install.sh does everything from main, called on its last
 # line, so any copy cut before that call is complete runs nothing. Cut up to "mai": "main" alone is
 # the whole script.
-size=$(wc -c < docs/install.sh | tr -d ' ')
-call=$((size - $(tail -n 1 docs/install.sh | wc -c | tr -d ' ')))
+size=$(wc -c < "$work/install.sh" | tr -d ' ')
+call=$((size - $(tail -n 1 "$work/install.sh" | wc -c | tr -d ' ')))
 [[ $(tail -n 1 docs/install.sh) == 'main "$@"' ]] || fail "install.sh does not end by calling main"
 runs=0
 for shell in sh bash; do
   for cut in $(seq 1 53 $((call - 1))) $call $((call + 1)) $((call + 2)) $((call + 3)); do
-    out=$(head -c "$cut" docs/install.sh | ADIT_DOWNLOAD="file://$work/release" "$shell" 2>&1) || true
+    out=$(head -c "$cut" "$work/install.sh" | "$shell" 2>&1) || true
     if grep -q Downloading <<< "$out" || [[ -e $bin/adit ]]; then
       fail "cut at byte $cut of $size, $shell ran it: $out"
     fi
@@ -71,19 +73,19 @@ done
 echo "$runs copies cut short, under sh and bash: none ran anything"
 
 step "install"
-ADIT_DOWNLOAD="file://$work/release" sh docs/install.sh
+sh "$work/install.sh"
 for cmd in adit aditd adit-tray; do
   [[ $(stat -f '%Su:%Sg %Lp' "$bin/$cmd") == "root:wheel 755" ]] || fail "$bin/$cmd is not root:wheel 755"
 done
 sudo launchctl print "system/$label" | grep -q 'state = running' || fail "launchd does not show aditd running"
 [[ $("$bin/aditd" -version) == "$version" ]] || fail "aditd is not $version"
 "$bin/adit" version | grep -q "adit $version" || fail "adit is not $version"
-grep -q "$bin/adit-tray" "/Library/LaunchAgents/$label.tray.plist" || fail "the menu bar icon does not start from $bin"
+grep -q "/Library/PrivilegedHelperTools/$label.tray" "/Library/LaunchAgents/$label.tray.plist" || fail "the menu bar icon does not start from its root-owned copy"
 expect 0 "$bin/adit" list
 echo "adit, aditd and adit-tray are root's, in $bin; aditd $version runs; $(id -un) uses adit without sudo"
 
 step "run again, as an upgrade"
-ADIT_DOWNLOAD="file://$work/release" sh docs/install.sh > /dev/null
+sh "$work/install.sh" > /dev/null
 sudo launchctl print "system/$label" | grep -q 'state = running' || fail "aditd does not run after the upgrade"
 expect 0 "$bin/adit" list
 
@@ -91,7 +93,7 @@ step "remove, as the installer says"
 sudo "$bin/adit" uninstall --yes
 sudo rm "$bin/adit" "$bin/aditd" "$bin/adit-tray"
 for path in "$bin/adit" "$bin/aditd" "$bin/adit-tray" "/Library/LaunchDaemons/$label.plist" \
-  "/Library/LaunchAgents/$label.tray.plist" "/Library/PrivilegedHelperTools/$label" /var/db/adit; do
+  "/Library/LaunchAgents/$label.tray.plist" "/Library/PrivilegedHelperTools/$label" "/Library/PrivilegedHelperTools/$label.tray" /var/db/adit; do
   [[ ! -e $path ]] || fail "$path was left behind"
 done
 echo "nothing left"

@@ -62,7 +62,8 @@ func (a *app) watch() {
 			return nil
 		})
 		a.mu.Lock()
-		a.unreachable = err.Error()
+		// What the watch last said is no longer known: with aditd gone, so are its tunnels.
+		a.unreachable, a.tunnels, a.others = err.Error(), nil, nil
 		a.mu.Unlock()
 		a.render()
 		time.Sleep(3 * time.Second)
@@ -85,7 +86,11 @@ func (a *app) render() {
 	a.menu = cancel
 
 	systray.ResetMenu()
-	systray.SetTitle(tray.Count(a.tunnels))
+	if a.unreachable != "" {
+		systray.SetTitle("!")
+	} else {
+		systray.SetTitle(tray.Count(a.tunnels))
+	}
 	for _, row := range rows {
 		switch row.Kind {
 		case tray.KindSeparator:
@@ -101,8 +106,10 @@ func (a *app) render() {
 	quit := systray.AddMenuItem("Quit adit menu", "The tunnels stay as they are: aditd keeps them")
 	go func() {
 		select {
-		case <-quit.ClickedCh:
-			systray.Quit()
+		case _, clicked := <-quit.ClickedCh:
+			if clicked { // a closed channel, when the menu is rebuilt, is not a click
+				systray.Quit()
+			}
 		case <-ctx.Done():
 		}
 	}()
@@ -111,8 +118,10 @@ func (a *app) render() {
 func (a *app) clicks(ctx context.Context, item *systray.MenuItem, name string, on bool) {
 	select {
 	case <-ctx.Done():
-	case <-item.ClickedCh:
-		go a.toggle(name, on)
+	case _, clicked := <-item.ClickedCh:
+		if clicked { // a closed channel, when the menu is rebuilt, is not a click
+			go a.toggle(name, on)
+		}
 	}
 }
 

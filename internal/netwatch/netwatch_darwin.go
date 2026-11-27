@@ -43,16 +43,24 @@ func Watch(ctx context.Context, settle time.Duration, changed func()) error {
 		}
 	}()
 
+	// A steady stream of messages (an on-link party can send them at will) must not hold changed off
+	// for ever: it runs at the latest maxWait after the first message of a burst.
+	maxWait := 10 * settle
 	timer := time.NewTimer(settle)
 	timer.Stop()
+	var deadline time.Time
 	for {
 		select {
 		case _, open := <-events:
 			if !open {
 				return ctx.Err()
 			}
-			timer.Reset(settle)
+			if deadline.IsZero() {
+				deadline = time.Now().Add(maxWait)
+			}
+			timer.Reset(min(settle, max(time.Until(deadline), 0)))
 		case <-timer.C:
+			deadline = time.Time{}
 			changed()
 		}
 	}

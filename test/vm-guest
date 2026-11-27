@@ -87,17 +87,18 @@ before_reboot() {
     curl -fsSL https://adit.saulo.pro/install.sh | sh
   else
     step "install with install.sh, from the release built for this test"
-    ADIT_DOWNLOAD="file://$PWD/release" sh ./install.sh
+    local_installer "$PWD/release" "$HOME/install.sh" ./install.sh
+    sh "$HOME/install.sh"
   fi
   [[ $(command -v adit) == /usr/local/bin/adit ]] || fail "adit is not in /usr/local/bin"
   expect 4 adit install
   sudo launchctl print "system/$label" | grep -q 'state = running' || fail "launchd does not show aditd running"
   [[ $(stat -f '%Su:%Sg %Lp' /var/run/adit/aditd.sock) == "root:adit 660" ]] || fail "the socket is not root:adit 660"
   for _ in $(seq 25); do
-    pgrep -x adit-tray > /dev/null && break
+    pgrep -f "^/Library/PrivilegedHelperTools/pro.saulo.adit.tray" > /dev/null && break
     sleep 0.2
   done
-  pgrep -x adit-tray > /dev/null || fail "the menu bar icon is not running in the desktop session"
+  pgrep -f "^/Library/PrivilegedHelperTools/pro.saulo.adit.tray" > /dev/null || fail "the menu bar icon is not running in the desktop session"
   echo "aditd runs, its socket is root:adit 660, and the menu bar icon runs in the desktop session"
 
   step "three test servers, started at boot by LaunchDaemons"
@@ -172,7 +173,7 @@ stamp() {
 after_reboot() {
   step "after the reboot, the login window waits and nobody is logged in"
   nobody_logged_in
-  if pgrep -x adit-tray > /dev/null; then
+  if pgrep -f "^/Library/PrivilegedHelperTools/pro.saulo.adit.tray" > /dev/null; then
     fail "the menu bar icon runs, so someone is logged in"
   fi
   local boot

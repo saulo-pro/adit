@@ -97,7 +97,8 @@ func TestBadRequests(t *testing.T) {
 		req  api.Request
 		says string
 	}{
-		{api.Request{Command: "reboot"}, `aditd does not know the command "reboot"`},
+		{api.Request{Command: "reboot"}, "aditd does not know that command"},
+		{api.Request{Command: api.CommandStatus, Name: strings.Repeat("x", 200)}, "that name is too long to be a tunnel's"},
 		{api.Request{Command: api.CommandUp}, "up needs a tunnel name"},
 		{api.Request{Command: api.CommandAutostart, Name: "work"}, "autostart needs on or off"},
 	}
@@ -551,5 +552,13 @@ func TestOtherSoftwaresTunnelsAreShownNotChanged(t *testing.T) {
 		if err.Code != api.CodeFailed || err.Message != "williamsburg is the WireGuard app's tunnel: adit shows it but does not change it; use the WireGuard app" {
 			t.Errorf("%s: %+v", command, err)
 		}
+	}
+}
+
+func TestAMemberCannotSendALargeRequest(t *testing.T) {
+	client, _ := serve(t, roleMember)
+	// aditd stops reading at the limit and answers: the client sees a refusal or a closed connection.
+	if _, err := client.Do(context.Background(), api.Request{Command: api.CommandStatus, Name: "work", File: strings.Repeat("x", maxMemberRequest)}); err == nil {
+		t.Error("a member's oversized request was served")
 	}
 }

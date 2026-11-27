@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Starts two WireGuard test servers, on 127.0.0.1:51821 and :51822, answering ping and DNS at
+# Starts two WireGuard test servers, on UDP ports 51821 and 51822, answering ping and DNS at
 # 10.99.1.1 and 10.99.2.1 (for test1.adit.test and test2.adit.test), and writes their client files
-# to test/servers/out/. They run in user space (test/wgserver): no root, no Docker, nothing on the
-# Mac's own network.
+# to test/servers/out/. They run in user space (test/wgserver): no root, no Docker. Their UDP ports
+# listen on every interface, but answer only the client key each one made; their tunnel addresses
+# exist only inside them. Stop them with test/servers/down.
 set -euo pipefail
 cd "$(dirname "$0")"
 

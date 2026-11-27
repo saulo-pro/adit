@@ -1,10 +1,16 @@
 #!/usr/bin/env bash
 # The command line against a real aditd, as a person uses them. aditd runs as root on a scratch
 # socket and store, with your own primary group standing in for adit; adit runs as you, or under
-# sudo for the commands that need root. Needs a Mac, Docker and sudo.
+# sudo for the commands that need root. Needs a Mac and sudo.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 source test/lib.sh
+
+# Its aditd clears every resolver file adit wrote when it starts: next to an installed adit, that
+# would take DNS from tunnels that are up.
+if [[ -e /Library/LaunchDaemons/pro.saulo.adit.plist ]]; then
+  fail "adit is installed here, and this test's aditd would disturb it; run it in CI or test/vm"
+fi
 
 test/servers/up
 
@@ -20,6 +26,7 @@ sudo -v
 sudo "$work/aditd" -socket "$ADIT_SOCKET" -store "$work/store" -group "$(id -gn)" 2> "$work/aditd.log" &
 aditd=$!
 finish() {
+  test/servers/down || true
   sudo kill "$aditd" 2> /dev/null || true
   wait "$aditd" 2> /dev/null || true
   printf '\n--- aditd log\n'

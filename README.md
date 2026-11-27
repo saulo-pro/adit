@@ -3,7 +3,7 @@
 A client for WireGuard® tunnels on macOS that keeps several of them up at once, with a menu bar
 icon and a command line that do the same things.
 
-> **Status:** 0.1.2. Full tunnels (`AllowedIPs = 0.0.0.0/0`) come in the
+> **Status:** 0.1.3. Full tunnels (`AllowedIPs = 0.0.0.0/0`) come in the
 > next version: adit refuses them for now, saying so.
 
 ## What it is for
@@ -91,6 +91,12 @@ allowed; 5 no such tunnel; 6 refused because of a conflict.
   or the menu. The store is left out of Time Machine. Export writes a new file only, readable only
   by you, and never through a link. `aditd`'s log is readable by root alone.
 - No telemetry, and no network traffic but the tunnels' own.
+- A tunnel's server can reach whatever on the Mac listens on every address (a file share, a
+  development server), as any network the Mac joins can. Keep such services on 127.0.0.1, or behind
+  the macOS firewall, when you connect to a server you do not run.
+- Releases are built on GitHub's machines from the tagged commit and carry a build provenance
+  attestation: `gh attestation verify adit-macos.tar.gz --repo saulo-pro/adit`. They are not signed
+  with an Apple Developer ID.
 
 ## How it works
 

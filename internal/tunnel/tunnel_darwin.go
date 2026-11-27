@@ -88,10 +88,26 @@ func (t *Tunnel) Status() (Status, error) {
 // NetworkChanged moves the device's UDP socket to the Mac's new network, then looks endpoint names up
 // again: after a move, a name may resolve elsewhere.
 func (t *Tunnel) NetworkChanged(ctx context.Context) error {
-	if err := t.device.BindUpdate(); err != nil {
-		return fmt.Errorf("WireGuard could not move to the new network: %w", err)
+	// BindUpdate closes the old socket before opening the new one; if the port is taken in between
+	// (another account can bind it), the device would be left without a socket. Try again, and in
+	// the end let WireGuard pick another port rather than stay deaf.
+	var err error
+	for wait := 100 * time.Millisecond; wait <= 1600*time.Millisecond; wait *= 2 {
+		if err = t.device.BindUpdate(); err == nil {
+			return t.Reresolve(ctx)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(wait):
+		}
 	}
-	return t.Reresolve(ctx)
+	if setErr := t.device.IpcSet("listen_port=0\n"); setErr == nil {
+		if err = t.device.BindUpdate(); err == nil {
+			return t.Reresolve(ctx)
+		}
+	}
+	return fmt.Errorf("WireGuard could not move to the new network: %w", err)
 }
 
 // Reresolve looks up the endpoints given as names again, and points each peer whose name now

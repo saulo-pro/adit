@@ -93,6 +93,7 @@ type running struct {
 type attempt struct {
 	cancel context.CancelFunc
 	config *conf.Config
+	done   chan struct{} // closed once the attempt has finished and closed any device it made
 }
 
 type Manager struct {
@@ -104,6 +105,7 @@ type Manager struct {
 	running  map[string]*running // by stored name
 	starting map[string]*attempt // by stored name
 	retrying map[string]*retry   // autostart tunnels aditd keeps trying, by stored name
+	stopping map[string]*attempt // attempts taken down while starting, until their device is closed
 	watchers map[chan struct{}]struct{}
 
 	othersSeen []others.Tunnel // other software's tunnels, as last read
@@ -137,6 +139,7 @@ func newManager(st *store.Store, sys system, log *slog.Logger) *Manager {
 		running:  map[string]*running{},
 		starting: map[string]*attempt{},
 		retrying: map[string]*retry{},
+		stopping: map[string]*attempt{},
 		watchers: map[chan struct{}]struct{}{},
 	}
 }
@@ -246,6 +249,17 @@ func (m *Manager) up(ctx context.Context, name string, r *retry) error {
 		m.mu.Unlock()
 		return errStopped
 	}
+	// A start that was taken down may still hold a device: wait for it to let go, so a tunnel never
+	// has two.
+	for stopping, ok := m.stopping[t.Name]; ok; stopping, ok = m.stopping[t.Name] {
+		m.mu.Unlock()
+		select {
+		case <-stopping.done:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+		m.mu.Lock()
+	}
 	_, up := m.running[t.Name]
 	_, coming := m.starting[t.Name]
 	if up || coming {
@@ -263,7 +277,7 @@ func (m *Manager) up(ctx context.Context, name string, r *retry) error {
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	this := &attempt{cancel: cancel, config: t.Config}
+	this := &attempt{cancel: cancel, config: t.Config, done: make(chan struct{})}
 	m.starting[t.Name] = this
 	m.notify()
 	m.mu.Unlock()
@@ -277,6 +291,12 @@ func (m *Manager) up(ctx context.Context, name string, r *retry) error {
 	if current {
 		delete(m.starting, t.Name)
 	}
+	defer func() {
+		if m.stopping[t.Name] == this {
+			delete(m.stopping, t.Name)
+		}
+		close(this.done)
+	}()
 	switch {
 	case err != nil:
 		return fmt.Errorf("%s did not come up: %w", t.Name, err)
@@ -579,13 +599,15 @@ func (m *Manager) down(name string) {
 	if a, coming := m.starting[name]; coming {
 		a.cancel()
 		delete(m.starting, name)
+		m.stopping[name] = a
 	}
 	if r, up := m.running[name]; up {
-		r.dev.Close()
-		delete(m.running, name)
+		// DNS goes first: names must not go on to the tunnel's servers once it cannot reach them.
 		if err := m.resolvers.Clear(name); err != nil {
 			m.log.Warn("resolver files left behind", "tunnel", name, "error", err)
 		}
+		r.dev.Close()
+		delete(m.running, name)
 		m.log.Info("tunnel down", "tunnel", name)
 	}
 }

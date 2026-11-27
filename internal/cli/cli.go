@@ -16,6 +16,7 @@ import (
 	"os/user"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/saulo-pro/adit/internal/api"
 	"github.com/saulo-pro/adit/internal/install"
@@ -135,7 +136,36 @@ func (c *CLI) print(out *output, value any, words string) {
 		encoder.Encode(value)
 		return
 	}
-	io.WriteString(c.Stdout, words)
+	io.WriteString(c.Stdout, safeForTerminal(words))
+}
+
+// safeForTerminal escapes characters a terminal would act on or hide (C0 and C1 controls but tab and
+// newline, DEL, Unicode format characters), so text from aditd, from a configuration file or from
+// another program cannot move the cursor, rewrite a line or hide a word.
+func safeForTerminal(s string) string {
+	clean := true
+	for _, r := range s {
+		if unsafeRune(r) {
+			clean = false
+			break
+		}
+	}
+	if clean {
+		return s
+	}
+	var b strings.Builder
+	for _, r := range s {
+		if unsafeRune(r) {
+			fmt.Fprintf(&b, "\\u%04x", r)
+		} else {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+func unsafeRune(r rune) bool {
+	return r != '\n' && r != '\t' && (r < 0x20 || r == 0x7f || (r >= 0x80 && r < 0xa0) || unicode.Is(unicode.Cf, r))
 }
 
 // fail reports err and returns the exit status for it. In JSON mode the error goes to standard
@@ -154,7 +184,7 @@ func (c *CLI) fail(out *output, err error) int {
 	if out.json {
 		c.print(out, map[string]any{"error": apiErr}, "")
 	} else {
-		fmt.Fprintf(c.Stderr, "adit: %s\n", apiErr.Message)
+		fmt.Fprintf(c.Stderr, "adit: %s\n", safeForTerminal(apiErr.Message))
 		if isUsage {
 			fmt.Fprintln(c.Stderr, "Run adit help for usage.")
 		}
@@ -203,14 +233,10 @@ func newFlags(name string) *flag.FlagSet {
 }
 
 // New is the command line as people run it. ADIT_SOCKET points it at another aditd, for testing;
-// under sudo it is ignored, so a variable in the environment cannot send a key elsewhere.
+// under sudo adit talks only to an aditd running as root, wherever the socket is.
 func New(version string, stdin io.Reader, stdout, stderr io.Writer) *CLI {
-	socket := os.Getenv("ADIT_SOCKET")
-	if os.Geteuid() == 0 {
-		socket = ""
-	}
 	return &CLI{
-		Client:  &api.Client{Socket: socket},
+		Client:  &api.Client{Socket: os.Getenv("ADIT_SOCKET"), RootPeer: os.Geteuid() == 0},
 		Version: version,
 		Stdin:   stdin,
 		Stdout:  stdout,

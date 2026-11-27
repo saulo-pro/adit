@@ -564,3 +564,10 @@ func TestOtherSoftwaresTunnelsAreListedReadOnly(t *testing.T) {
 		t.Errorf("JSON others %v", got.Others)
 	}
 }
+
+func TestOutputNeverCarriesTerminalControls(t *testing.T) {
+	got := safeForTerminal("diner\x1b[2Kup‮\tok\n")
+	if strings.ContainsAny(got, "\x1b‮") || !strings.Contains(got, "\\u001b[2K") || !strings.HasSuffix(got, "\tok\n") {
+		t.Errorf("got %q", got)
+	}
+}

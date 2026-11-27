@@ -9,7 +9,9 @@ asks.
 
 - **Tags.** Each release is a tag `vX.Y.Z`. A pushed tag is never moved or deleted: a fix is a new
   version.
-- **GitHub releases.** Every tag gets a GitHub release, made by `.github/workflows/release.yml`.
+- **GitHub releases.** Every tag gets a GitHub release, made by `.github/workflows/release.yml`:
+  a build job with a read-only token, then a publish job in the `release` environment. Releases are
+  immutable, so the job drafts, uploads, then publishes.
   Anything not stable (`v0.2.0-rc.1`: any version with a suffix) is published as a prerelease, so
   it never becomes GitHub's "Latest release".
 - **The standard install gets GitHub's Latest release.** Never the tip of `main`, and never a version
@@ -31,6 +33,12 @@ asks.
 - **A one-line installer runs nothing until it has fully arrived.** All of `docs/install.sh`'s work is
   in `main()`, called on its last line, so a download cut short by `curl … | sh` runs nothing.
   `test/installer` checks it.
+
+## Nothing about the maintainer
+
+This repository is public. Never write anything about the maintainer's machines, networks,
+infrastructure, credentials or way of working into it: not in files, commit messages, tags, release
+notes, issues or pull requests. Decisions about those belong elsewhere, not here.
 
 ## Examples and test data
 

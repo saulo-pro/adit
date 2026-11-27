@@ -29,6 +29,7 @@ unset ADIT_SOCKET
 echo "This installs adit for real: sudo asks for your password once."
 sudo -v
 cleanup() {
+  test/servers/down || true
   if ! $keep; then
     sudo "$adit" uninstall --yes > /dev/null 2>&1 || true
   fi
@@ -61,10 +62,10 @@ echo "aditd runs from a root-owned binary; its socket is root:adit 660; $(id -un
 [[ -e /Library/LaunchAgents/$label.tray.plist ]] || fail "the menu bar icon's LaunchAgent is missing"
 if launchctl print "gui/$(id -u)" > /dev/null 2>&1; then
   for _ in $(seq 25); do
-    pgrep -x adit-tray > /dev/null && break
+    pgrep -f "^/Library/PrivilegedHelperTools/pro.saulo.adit.tray" > /dev/null && break
     sleep 0.2
   done
-  pgrep -x adit-tray > /dev/null || fail "the menu bar icon is not running"
+  pgrep -f "^/Library/PrivilegedHelperTools/pro.saulo.adit.tray" > /dev/null || fail "the menu bar icon is not running"
   echo "the menu bar icon is running, and starts at every login"
 else
   echo "(no desktop session here, so the menu bar icon only starts at the next login)"
@@ -111,7 +112,7 @@ step "uninstall leaves nothing behind"
 interfaces=$(adit_interfaces "$adit")
 expect 0 sudo "$adit" uninstall --yes
 sleep 1
-if pgrep -x adit-tray > /dev/null; then
+if pgrep -f "^/Library/PrivilegedHelperTools/pro.saulo.adit.tray" > /dev/null; then
   fail "the menu bar icon is still running"
 fi
 for path in "/Library/LaunchDaemons/$label.plist" "/Library/LaunchAgents/$label.tray.plist" "/Library/PrivilegedHelperTools/$label" \

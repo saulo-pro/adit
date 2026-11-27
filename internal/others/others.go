@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/saulo-pro/adit/internal/tunnel"
 )
@@ -56,7 +57,7 @@ func (f *Finder) wgQuick() []Tunnel {
 		if !validInterface(iface) {
 			continue
 		}
-		t := Tunnel{Name: strings.TrimSuffix(filepath.Base(path), ".name"), Source: SourceWgQuick, State: "running", Interface: iface}
+		t := Tunnel{Name: printable(strings.TrimSuffix(filepath.Base(path), ".name")), Source: SourceWgQuick, State: "running", Interface: iface}
 		if status, err := ask(filepath.Join(f.WireGuardDir, iface+".sock")); err == nil {
 			t.Peers = status.Peers
 		}
@@ -117,7 +118,7 @@ func (f *Finder) app() []Tunnel {
 		if m == nil {
 			continue
 		}
-		state, id, name := strings.ToLower(m[1]), m[2], m[3]
+		state, id, name := strings.ToLower(m[1]), m[2], printable(m[3])
 		t := Tunnel{Name: name, Source: SourceApp, State: state}
 		if state == "connected" || state == "connecting" {
 			t.Interface = f.appInterface(id)
@@ -151,4 +152,23 @@ func Describe(tunnels []Tunnel, iface string) string {
 		}
 	}
 	return iface + ", another program's tunnel"
+}
+
+// printable makes another program's tunnel name safe to show: characters a terminal or the menu
+// would act on or hide are dropped, and the name is cut to 64 characters. adit's own names are
+// checked at import; these come from files and tools another account may influence.
+func printable(name string) string {
+	var b strings.Builder
+	n := 0
+	for _, r := range name {
+		if !unicode.IsPrint(r) || unicode.Is(unicode.Cf, r) {
+			continue
+		}
+		if n++; n > 64 {
+			b.WriteString("…")
+			break
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
 }

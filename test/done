@@ -26,6 +26,7 @@
 #
 # Uses the adit on PATH: install it with Homebrew first.
 set -euo pipefail
+umask 077
 cd "$(dirname "$0")/.."
 source test/lib.sh
 
@@ -129,8 +130,11 @@ before_reboot() {
   expect 0 sudo adit install
 
   step "importing a file with PostUp warns, and bringing it up does not run it"
-  local hooked marker="/tmp/adit-done-postup-ran"
-  hooked=$(mktemp -t adit-hooked).conf
+  local hooked dir marker="/tmp/adit-done-postup-ran"
+  # The copy holds the real private key: a folder only this account can read, removed on any exit.
+  dir=$(mktemp -d -t adit-hooked)
+  trap 'rm -rf "$dir"' EXIT
+  hooked="$dir/hooked.conf"
   grep -v '^PostUp' "$real" | sed "/^\[Interface\]/a\\
 PostUp = touch $marker
 " > "$hooked"

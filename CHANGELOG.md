@@ -7,6 +7,11 @@ notes of its GitHub release.
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-11-27
+
+Security fixes from a full review of adit, its dependencies and how it is built and installed.
+Install it again after upgrading: `sudo adit install` (Homebrew) or the one-line installer.
+
 ### Security
 
 - Releases are built with no cache from earlier CI runs, with every module checked against `go.sum`,
@@ -24,7 +29,8 @@ notes of its GitHub release.
   account's programs could change; `sudo adit install` checks and installs root-owned copies of
   `aditd` and the icon, and says when their source folder is writable by other accounts.
 - `sudo adit export` hands the new file over before writing the key and never writes through a
-  link; `sudo adit import` reads only a regular file. Under `sudo`, `ADIT_SOCKET` is ignored.
+  link; `sudo adit import` reads only a regular file. Under `sudo`, adit talks only to an `aditd`
+  running as root.
 - `sudo adit install` refuses a group named adit it did not create unless `--reuse-group`, gives
   the group it creates an unused id below 500, and `uninstall` deletes only a group adit created.
 - `adit version` says when `aditd` is older than `adit`.
@@ -41,6 +47,21 @@ notes of its GitHub release.
   link-local, multicast and unroutable AllowedIPs, link-local addresses and reserved ListenPorts
   are refused. Table, SaveConfig and FwMark lines draw a warning: adit ignores them.
 - A peer's endpoint no longer moves to wherever one of its packets came from.
+- `aditd` holds up under load: at most 64 connections and 8 watchers per account, small requests
+  from anyone but root, nothing read from callers outside the adit group, unknown commands refused
+  before they are logged, and a temporary accept error no longer stops it answering. A watch ends
+  when its account leaves the adit group.
+- After a network change, a tunnel's UDP socket comes back even if its port was taken meanwhile;
+  taking a tunnel down while it is coming up waits for it to let go of its device, and DNS for a
+  tunnel stops before its device does. Tunnel names match with ASCII case folding only.
+- The command line escapes terminal control characters in everything it prints, other programs'
+  tunnel names are cleaned up before they are shown, and `import` says what the tunnel will route
+  and where its DNS and server are. The menu bar icon acts only on real clicks, and shows `!`
+  instead of a tunnel count while `aditd` cannot be reached.
+- `install.sh` copies the archive into a folder only root can enter, checks it there and installs
+  from there, calls every tool by its full path, accepts only HTTPS, refuses an `ADIT_VERSION` that
+  is not a version, and no longer has a test-only download switch.
+- The landing page allows only its analytics script, and lets it report only to Cloudflare.
 
 ### Changed
 
@@ -103,5 +124,6 @@ The first version, for macOS.
 - Homebrew: `brew install saulo-pro/tap/adit`.
 - Full tunnels (`AllowedIPs = 0.0.0.0/0`) are refused for now, saying so.
 
-[Unreleased]: https://github.com/saulo-pro/adit/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/saulo-pro/adit/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/saulo-pro/adit/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/saulo-pro/adit/releases/tag/v0.1.2
