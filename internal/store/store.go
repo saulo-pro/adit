@@ -71,6 +71,16 @@ func Open(dir string) (*Store, error) {
 	if !ownedByMe(info) {
 		return nil, fmt.Errorf("the tunnel store %s belongs to another user", dir)
 	}
+	// Keys must not end up in backups; failing to say so is not a reason to refuse to start.
+	_ = excludeFromBackups(dir)
+	// A crash between writing and renaming leaves a whole configuration in a temporary file.
+	if leftovers, err := filepath.Glob(filepath.Join(dir, ".write-*")); err == nil {
+		for _, file := range leftovers {
+			if info, err := os.Lstat(file); err == nil && info.Mode().IsRegular() {
+				os.Remove(file)
+			}
+		}
+	}
 	return &Store{dir: dir}, nil
 }
 

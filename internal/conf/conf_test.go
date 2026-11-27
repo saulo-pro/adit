@@ -133,9 +133,12 @@ func TestSecretsNeverPrinted(t *testing.T) {
 		t.Fatal(err)
 	}
 	outputs := map[string]string{"JSON": string(encoded)}
-	for _, verb := range []string{"%v", "%+v", "%#v", "%s", "%x", "%X", "%q"} {
+	type holder struct{ config Config } // unexported: fmt cannot call Format through it
+	for _, verb := range []string{"%v", "%+v", "%#v", "%s", "%x", "%X", "%q", "%p", "%d", "%!"} {
 		outputs[verb] = fmt.Sprintf(verb, config)
 		outputs[verb+" of the value"] = fmt.Sprintf(verb, *config)
+		outputs[verb+" of an unexported holder"] = fmt.Sprintf(verb, holder{*config})
+		outputs[verb+" of the secret"] = fmt.Sprintf(verb, config.Interface.PrivateKey)
 	}
 
 	for _, secret := range []string{privateKey, presharedKey} {
@@ -185,7 +188,9 @@ func TestParseErrors(t *testing.T) {
 		{"no private key", "[Interface]\nAddress = 10.99.1.2/24\n", 1, "[Interface] has no PrivateKey"},
 		{"setting before any section", "Address = 10.99.1.2/24\n", 1, `"Address" comes before any section`},
 		{"no equals sign", head + "Address 10.99.1.2/24\n", 3, "Key = value"},
-		{"unknown section", head + "[Peers]\n", 3, "unknown section [Peers]"},
+		{"unknown section", head + "[Peers]\n", 3, `unknown section "[Peers]"`},
+		{"control character", head + "DNS = 10.99.1.1\x1b[2K\n", 3, "control character"},
+		{"bidirectional override", head + "DNS = 10.99.1.1 \u202e\n", 3, "control character"},
 		{"unclosed header", head + "[Peer\n", 3, "must end with ]"},
 		{"second interface", head + "[Interface]\n", 3, "a second [Interface] section; the first is on line 1"},
 		{"unknown setting", head + "Jc = 4\n", 3, `unknown setting "Jc" in [Interface]`},
@@ -281,5 +286,30 @@ func assertEqual[T any](t *testing.T, what string, got, want T) {
 	t.Helper()
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("%s = %v, want %v", what, got, want)
+	}
+}
+
+// TestErrorsNeverQuoteKeys: a malformed key line (no =, a colon, a bare key, a key run onto another
+// setting) must not put the key into the error, which reaches the terminal and aditd's log.
+func TestErrorsNeverQuoteKeys(t *testing.T) {
+	for _, line := range []string{
+		"PrivateKey " + privateKey,
+		"PrivateKey: " + privateKey,
+		privateKey,
+		"Address = 10.99.1.2/24 PrivateKey = " + privateKey,
+		"DNS = " + privateKey,
+		"[" + privateKey + "]",
+	} {
+		for _, input := range []string{"[Interface]\n" + line + "\n", line + "\n", "[Interface]\nPrivateKey = " + privateKey + "\n[Peer]\nPresharedKey " + presharedKey + "\n"} {
+			_, err := Parse([]byte(input))
+			if err == nil {
+				continue
+			}
+			for _, key := range []string{privateKey, presharedKey, privateKey[:43], presharedKey[:43]} {
+				if strings.Contains(err.Error(), key) {
+					t.Errorf("%q: the error quotes a key: %v", line, err)
+				}
+			}
+		}
 	}
 }

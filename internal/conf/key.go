@@ -33,24 +33,33 @@ func (k Key) IsZero() bool {
 	return k == Key{}
 }
 
-// A Secret is a private or preshared key. Every fmt verb prints it as "(secret)" and JSON as {},
-// so logging or encoding a Config cannot leak it. Reveal is the one way to its bytes.
+// A Secret is a private or preshared key. Its bytes sit behind a pointer, so wherever a Secret ends
+// up (in a struct printed with %v or %+v, behind an unexported field fmt cannot call Format on, with
+// %p or a verb fmt does not know) fmt prints at most an address, never the key. Format prints
+// "(secret)", JSON shows {}, and Reveal is the one way to the bytes.
 type Secret struct {
-	key [keyLen]byte
+	key *[keyLen]byte
 }
 
 func parseSecret(s string) (Secret, error) {
 	k, err := ParseKey(s)
-	return Secret{key: k}, err
+	if err != nil {
+		return Secret{}, err
+	}
+	b := [keyLen]byte(k)
+	return Secret{key: &b}, nil
 }
 
 // Reveal returns the key itself, for handing to the WireGuard device and nothing else.
 func (s Secret) Reveal() [keyLen]byte {
-	return s.key
+	if s.key == nil {
+		return [keyLen]byte{}
+	}
+	return *s.key
 }
 
 func (s Secret) IsZero() bool {
-	return s.key == [keyLen]byte{}
+	return s.key == nil || *s.key == [keyLen]byte{}
 }
 
 func (s Secret) Format(f fmt.State, verb rune) {
@@ -58,5 +67,6 @@ func (s Secret) Format(f fmt.State, verb rune) {
 }
 
 func (s Secret) base64() string {
-	return base64.StdEncoding.EncodeToString(s.key[:])
+	k := s.Reveal()
+	return base64.StdEncoding.EncodeToString(k[:])
 }

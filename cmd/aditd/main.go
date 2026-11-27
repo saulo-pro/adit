@@ -26,6 +26,8 @@ func main() {
 	socket := flag.String("socket", api.DefaultSocket, "the socket to answer on")
 	storeDir := flag.String("store", "/var/db/adit/tunnels", "where tunnels and their keys are kept")
 	group := flag.String("group", "adit", "the group whose members may list, switch and watch tunnels; empty for root only")
+	logFile := flag.String("log", "", "a file to log to, opened again on SIGHUP; standard error if empty")
+	pidFile := flag.String("pidfile", "", "a file to write the process id to, for newsyslog")
 	showVersion := flag.Bool("version", false, "print the version and exit")
 	flag.Parse()
 
@@ -33,17 +35,42 @@ func main() {
 		fmt.Println(version)
 		return
 	}
-	if err := run(*socket, *storeDir, *group); err != nil {
+	if err := run(*socket, *storeDir, *group, *logFile, *pidFile); err != nil {
 		fmt.Fprintln(os.Stderr, "aditd:", err)
 		os.Exit(1)
 	}
 }
 
-func run(socket, storeDir, group string) error {
+func run(socket, storeDir, group, logFile, pidFile string) error {
 	if os.Geteuid() != 0 {
 		return fmt.Errorf("aditd must run as root: it creates network interfaces and routes")
 	}
+	// wireguard-go writes the name of each new interface to the file this names: never take it
+	// from the environment aditd was started with.
+	os.Unsetenv("WG_TUN_NAME_FILE")
+	if logFile != "" {
+		if err := openLog(logFile); err != nil {
+			return err
+		}
+	}
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	if logFile != "" {
+		hup := make(chan os.Signal, 1)
+		signal.Notify(hup, syscall.SIGHUP)
+		go func() {
+			for range hup {
+				if err := openLog(logFile); err != nil {
+					log.Warn("could not open the log again after rotation", "error", err)
+				}
+			}
+		}()
+	}
+	if pidFile != "" {
+		if err := writePid(pidFile); err != nil {
+			log.Warn("could not write the pid file: the log will not rotate", "file", pidFile, "error", err)
+		}
+		defer os.Remove(pidFile)
+	}
 
 	st, err := store.Open(storeDir)
 	if err != nil {

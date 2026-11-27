@@ -10,9 +10,10 @@ import (
 )
 
 const (
-	Store  = "/var/db/adit"
-	Binary = ""
-	Log    = ""
+	Store   = "/var/db/adit"
+	Binary  = ""
+	Log     = ""
+	PidFile = ""
 )
 
 var errUnsupported = errors.New("adit installs only on macOS for now")

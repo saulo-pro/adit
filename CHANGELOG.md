@@ -14,6 +14,12 @@ notes of its GitHub release.
   `gh attestation verify adit-macos.tar.gz --repo saulo-pro/adit` checks.
 - `golang.org/x/crypto`, `x/net` and `x/sys` are up to date, and CI checks for known
   vulnerabilities on every push.
+- A malformed key line no longer puts the key into the error, which reached the terminal and
+  aditd's log. Lines with control characters, which a terminal can hide, are refused at import.
+- aditd's log is readable by root alone, rotation now really starts a new file, and repeated
+  WireGuard errors are logged once a minute with a count.
+- Status reads no longer pass the tunnels' private keys around, the tunnel store is excluded from
+  Time Machine, and a crash while saving no longer leaves a copy of a configuration behind.
 
 ### Changed
 

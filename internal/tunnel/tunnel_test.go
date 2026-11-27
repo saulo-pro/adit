@@ -185,3 +185,19 @@ func TestEndpointUpdatesOnlyForNamesThatMoved(t *testing.T) {
 		t.Errorf("got %q, want %q: the peer given by address must be left alone", got, want)
 	}
 }
+
+func TestStatusTextKeepsNoKey(t *testing.T) {
+	var w withoutKeys
+	text := "private_key=" + strings.Repeat("ab", 32) + "\nlisten_port=51820\npublic_key=" + strings.Repeat("cd", 32) +
+		"\npreshared_key=" + strings.Repeat("ef", 32) + "\nrx_bytes=12\n"
+	for i := 0; i < len(text); i += 7 { // written in pieces that split lines
+		w.Write([]byte(text[i:min(i+7, len(text))]))
+	}
+	got := w.String()
+	if strings.Contains(got, "private_key") || strings.Contains(got, "preshared_key") || strings.Contains(got, "abab") || strings.Contains(got, "efef") {
+		t.Errorf("a key was kept: %q", got)
+	}
+	if !strings.Contains(got, "public_key="+strings.Repeat("cd", 32)) || !strings.Contains(got, "rx_bytes=12") {
+		t.Errorf("other lines were lost: %q", got)
+	}
+}

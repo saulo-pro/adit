@@ -6,6 +6,7 @@ package tunnel
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/hex"
 	"fmt"
@@ -180,4 +181,39 @@ func endpointUpdates(peers []conf.Peer, resolved []netip.AddrPort, status Status
 		}
 	}
 	return b.String()
+}
+
+// withoutKeys keeps what wireguard-go's get operation writes, minus its private_key= and
+// preshared_key= lines.
+type withoutKeys struct {
+	kept    strings.Builder
+	partial []byte
+}
+
+func (w *withoutKeys) Write(p []byte) (int, error) {
+	w.partial = append(w.partial, p...)
+	for {
+		i := bytes.IndexByte(w.partial, '\n')
+		if i < 0 {
+			return len(p), nil
+		}
+		w.keep(w.partial[:i+1])
+		w.partial = w.partial[i+1:]
+	}
+}
+
+func (w *withoutKeys) keep(line []byte) {
+	if bytes.HasPrefix(line, []byte("private_key=")) || bytes.HasPrefix(line, []byte("preshared_key=")) {
+		clear(line)
+		return
+	}
+	w.kept.Write(line)
+}
+
+func (w *withoutKeys) String() string {
+	if len(w.partial) > 0 {
+		w.keep(w.partial)
+		w.partial = nil
+	}
+	return w.kept.String()
 }

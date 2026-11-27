@@ -31,6 +31,7 @@ const (
 	Plist     = "/Library/LaunchDaemons/" + Label + ".plist"
 	Newsyslog = "/etc/newsyslog.d/" + Label + ".conf"
 	Log       = "/var/log/aditd.log"
+	PidFile   = "/var/run/aditd.pid"
 	Store     = "/var/db/adit"
 	StoreDir  = Store + "/tunnels"
 	RunDir    = "/var/run/adit"
@@ -107,6 +108,12 @@ func (i *Installer) Install(o Options, out io.Writer) error {
 		}
 	}
 	fmt.Fprintf(out, "Installed aditd at %s, and %s.\n", Binary, Plist)
+	// Logs an earlier version left are readable by everyone; aditd keeps the current one 0600.
+	if logs, _ := filepath.Glob(i.path(Log) + "*"); len(logs) > 0 {
+		for _, log := range logs {
+			os.Chmod(log, 0o600)
+		}
+	}
 
 	if output, err := i.Run("/bin/launchctl", "bootstrap", "system", i.path(Plist)); err != nil {
 		return fmt.Errorf("launchctl could not start aditd: %s", clean(output))
@@ -262,6 +269,10 @@ func plist() string {
     <string>` + Binary + `</string>
     <string>-store</string>
     <string>` + StoreDir + `</string>
+    <string>-log</string>
+    <string>` + Log + `</string>
+    <string>-pidfile</string>
+    <string>` + PidFile + `</string>
   </array>
   <key>RunAtLoad</key>
   <true/>
@@ -269,10 +280,6 @@ func plist() string {
   <true/>
   <key>ExitTimeOut</key>
   <integer>30</integer>
-  <key>StandardOutPath</key>
-  <string>` + Log + `</string>
-  <key>StandardErrorPath</key>
-  <string>` + Log + `</string>
 </dict>
 </plist>
 `
@@ -307,9 +314,10 @@ func trayAgent(tray string) string {
 `
 }
 
-// newsyslog rotates aditd's log at 1 MiB, keeping five, compressed.
-const newsyslog = "# logfilename        [owner:group]  mode  count  size  when  flags\n" +
-	Log + "  root:wheel     644   5      1024  *     J\n"
+// newsyslog rotates aditd's log at 1 MiB, keeping five, compressed and readable by root alone, and
+// sends aditd SIGHUP so it writes to the new file.
+const newsyslog = "# logfilename        [owner:group]  mode  count  size  when  flags  [pid_file]\n" +
+	Log + "  root:wheel     600   5      1024  *     J      " + PidFile + "\n"
 
 func clean(output []byte) string {
 	if s := strings.TrimSpace(string(output)); s != "" {

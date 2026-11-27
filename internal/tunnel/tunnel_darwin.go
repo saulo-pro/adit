@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"time"
 
 	"golang.zx2c4.com/wireguard/conn"
 	"golang.zx2c4.com/wireguard/device"
@@ -71,11 +72,13 @@ func (t *Tunnel) Interface() string {
 }
 
 func (t *Tunnel) Status() (Status, error) {
-	text, err := t.device.IpcGet()
-	if err != nil {
+	// The device reports its keys too; they are dropped line by line as they arrive, so the text
+	// that is kept, parsed or logged never holds one.
+	var text withoutKeys
+	if err := t.device.IpcGetOperation(&text); err != nil {
 		return Status{}, fmt.Errorf("the device on %s did not report its status: %w", t.iface, err)
 	}
-	return ParseStatus(t.iface, text)
+	return ParseStatus(t.iface, text.String())
 }
 
 // NetworkChanged moves the device's UDP socket to the Mac's new network, then looks endpoint names up
@@ -154,13 +157,22 @@ func routes(c *conf.Config) []netip.Prefix {
 	return routes
 }
 
-// deviceLogger passes wireguard-go's errors on; its verbose lines are dropped.
+// deviceLogger passes wireguard-go's errors on; its verbose lines are dropped. Some errors come once
+// per packet (a send that fails while the network is away), so each kind is logged at most once a
+// minute, with a count of the ones left out: the log is root's and must not fill the disk.
 func deviceLogger(log *slog.Logger, iface string) *device.Logger {
 	log = log.With("interface", iface)
+	limit := &rateLimit{every: time.Minute, now: time.Now, last: map[string]time.Time{}, held: map[string]int{}}
 	return &device.Logger{
 		Verbosef: device.DiscardLogf,
 		Errorf: func(format string, args ...any) {
-			log.Warn(fmt.Sprintf(format, args...))
+			if ok, skipped := limit.allow(format); ok {
+				if skipped > 0 {
+					log.Warn(fmt.Sprintf(format, args...), "similar_lines_not_logged", skipped)
+				} else {
+					log.Warn(fmt.Sprintf(format, args...))
+				}
+			}
 		},
 	}
 }

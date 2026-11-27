@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -31,6 +33,20 @@ func (e *Error) Error() string {
 
 func lineError(line int, format string, args ...any) *Error {
 	return &Error{Line: line, Msg: fmt.Sprintf(format, args...)}
+}
+
+// keyLike matches text that may be a key: a WireGuard key is 43 characters of base64 and a final =,
+// and a malformed line (a missing =, a colon, two settings run together) can put one where a name
+// or an entry is expected.
+var keyLike = regexp.MustCompile(`[A-Za-z0-9+/]{32,}`)
+
+// shown quotes text from the file for an error message, escaping control characters, unless it is
+// long or may hold a key: then it is left out, since errors reach the terminal and aditd's log.
+func shown(s string) string {
+	if len(s) > 100 || keyLike.MatchString(s) {
+		return "(not shown: it may hold a key)"
+	}
+	return strconv.Quote(s)
 }
 
 var (
@@ -58,6 +74,9 @@ func Parse(data []byte) (*Config, error) {
 		return nil, &Error{Msg: "the file is not text: it is not valid UTF-8"}
 	}
 	data = bytes.TrimPrefix(data, []byte("\uFEFF"))
+	if n, ok := controlCharacter(data); ok {
+		return nil, lineError(n, "the line holds a control character; a terminal could show it differently from what adit reads, so remove it")
+	}
 
 	p := parser{config: &Config{}}
 	for n, line := range strings.Split(string(data), "\n") {
@@ -69,6 +88,23 @@ func Parse(data []byte) (*Config, error) {
 		return nil, err
 	}
 	return p.config, nil
+}
+
+// controlCharacter finds the first line holding a character other than tab, CR and LF that a
+// terminal would act on or hide: C0 and C1 controls, DEL, and Unicode format characters such as the
+// bidirectional overrides.
+func controlCharacter(data []byte) (int, bool) {
+	line := 1
+	for _, r := range string(data) {
+		switch {
+		case r == '\n':
+			line++
+		case r == '\t' || r == '\r':
+		case r < 0x20 || r == 0x7f || (r >= 0x80 && r < 0xa0) || unicode.Is(unicode.Cf, r):
+			return line, true
+		}
+	}
+	return 0, false
 }
 
 type parser struct {
@@ -102,7 +138,7 @@ func (p *parser) line(n int, line string) error {
 	case "Peer":
 		return p.peerSetting(n, key, value)
 	default:
-		return lineError(n, "%q comes before any section; settings go under [Interface] or [Peer]", key)
+		return lineError(n, "%s comes before any section; settings go under [Interface] or [Peer]", shown(key))
 	}
 }
 
@@ -121,7 +157,7 @@ func (p *parser) header(n int, line string) error {
 		p.peerLines = append(p.peerLines, n)
 		p.config.Peers = append(p.config.Peers, Peer{})
 	default:
-		return lineError(n, "unknown section %s; a WireGuard configuration has only [Interface] and [Peer]", line)
+		return lineError(n, "unknown section %s; a WireGuard configuration has only [Interface] and [Peer]", shown(line))
 	}
 	p.seen = map[string]int{}
 	return nil
@@ -134,7 +170,7 @@ func (p *parser) setting(n int, key, value string, own, other map[string]string,
 		if name, elsewhere := other[strings.ToLower(key)]; elsewhere {
 			return "", lineError(n, "%s belongs in [%s], not [%s]", name, otherSection, p.section)
 		}
-		return "", lineError(n, "unknown setting %q in [%s]", key, p.section)
+		return "", lineError(n, "unknown setting %s in [%s]", shown(key), p.section)
 	}
 	if first, twice := p.seen[name]; twice && !slices.Contains(repeatable, name) {
 		return "", lineError(n, "%s appears twice in this section; it is already set on line %d", name, first)
@@ -222,7 +258,7 @@ func (p *parser) dns(n int, value string) error {
 		} else if validHostname(entry) {
 			i.DNSSearch = append(i.DNSSearch, entry)
 		} else {
-			return lineError(n, "DNS entry %q is neither an IP address nor a domain name", entry)
+			return lineError(n, "DNS entry %s is neither an IP address nor a domain name", shown(entry))
 		}
 	}
 	return nil
@@ -313,7 +349,7 @@ func parsePrefixes(n int, name, value string) ([]netip.Prefix, error) {
 		if err != nil {
 			addr, addrErr := netip.ParseAddr(entry)
 			if addrErr != nil || addr.Zone() != "" {
-				return nil, lineError(n, "%s entry %q is not an IP address with an optional prefix length, such as 10.99.1.2/24", name, entry)
+				return nil, lineError(n, "%s entry %s is not an IP address with an optional prefix length, such as 10.99.1.2/24", name, shown(entry))
 			}
 			prefix = netip.PrefixFrom(addr, addr.BitLen())
 		}
@@ -336,7 +372,7 @@ func parseEndpoint(n int, value string) (Endpoint, error) {
 			return Endpoint{}, lineError(n, "the Endpoint address must not name an interface zone (%%)")
 		}
 	} else if !validHostname(host) {
-		return Endpoint{}, lineError(n, "the Endpoint host %q is neither an IP address nor a host name", host)
+		return Endpoint{}, lineError(n, "the Endpoint host %s is neither an IP address nor a host name", shown(host))
 	}
 	return Endpoint{Host: host, Port: uint16(port)}, nil
 }

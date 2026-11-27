@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -203,5 +205,35 @@ func assertMode(t *testing.T, path string, want os.FileMode) {
 	}
 	if got := info.Mode().Perm(); got != want {
 		t.Errorf("%s has mode %o, want %o", filepath.Base(path), got, want)
+	}
+}
+
+func TestOpenRemovesWhatACrashLeft(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "tunnels")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".write-123"), []byte("[Interface]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Open(dir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".write-123")); !os.IsNotExist(err) {
+		t.Errorf("the leftover is still there: %v", err)
+	}
+}
+
+func TestOpenKeepsTheStoreOutOfBackups(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("Time Machine is macOS only")
+	}
+	dir := filepath.Join(t.TempDir(), "tunnels")
+	if _, err := Open(dir); err != nil {
+		t.Fatal(err)
+	}
+	out, err := exec.Command("/usr/bin/tmutil", "isexcluded", dir).CombinedOutput()
+	if err != nil || !strings.Contains(string(out), "[Excluded]") {
+		t.Errorf("tmutil isexcluded: %s %v", out, err)
 	}
 }
