@@ -10,10 +10,11 @@ import (
 	"strings"
 )
 
-// Route is one network the kernel sends into a tunnel interface.
+// Route is one network the kernel sends out of an interface.
 type Route struct {
 	Prefix    netip.Prefix
 	Interface string
+	Gateway   netip.Addr // the next hop; zero when the network is reached on the interface itself
 }
 
 // TunnelInterface says whether an interface is a tunnel: utun (WireGuard, most VPNs), ipsec, ppp.
@@ -57,6 +58,35 @@ func ignored(p netip.Prefix) bool {
 // the pair of /1 routes some programs use to win over the default route.
 func CatchAll(p netip.Prefix) bool {
 	return p.Bits() <= 1
+}
+
+// Default is the Mac's own default route for one family (IPv4 when v4): the one through a network
+// interface, not a tunnel's.
+func Default(table []Route, v4 bool) (Route, bool) {
+	for _, r := range table {
+		if r.Prefix.Bits() == 0 && r.Prefix.Addr().Is4() == v4 && !TunnelInterface(r.Interface) {
+			return r, true
+		}
+	}
+	return Route{}, false
+}
+
+// Local says whether addr is the Mac's own, or on a network the Mac reaches without its default
+// route: loopback, link-local, or a network interface's route more specific than a catch-all. Such
+// an address needs no route of its own to stay outside a full tunnel, whose /1 routes lose to
+// these. A host route through a gateway (adit's own for an endpoint, say) is not the local network.
+func Local(table []Route, addr netip.Addr) bool {
+	addr = addr.Unmap()
+	if addr.IsLoopback() || addr.IsLinkLocalUnicast() {
+		return true
+	}
+	for _, r := range table {
+		hostByGateway := r.Prefix.IsSingleIP() && r.Gateway.IsValid()
+		if !TunnelInterface(r.Interface) && !CatchAll(r.Prefix) && !hostByGateway && r.Prefix.Contains(addr) {
+			return true
+		}
+	}
+	return false
 }
 
 // maskBits counts a netmask's leading ones.

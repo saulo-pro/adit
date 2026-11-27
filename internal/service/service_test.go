@@ -8,11 +8,14 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/saulo-pro/adit/internal/bypass"
 	"github.com/saulo-pro/adit/internal/conf"
 	"github.com/saulo-pro/adit/internal/dns"
 	"github.com/saulo-pro/adit/internal/others"
@@ -117,26 +120,9 @@ func TestUpTwiceStartsOneDevice(t *testing.T) {
 	}
 }
 
-func TestFullTunnelsWaitForALaterVersion(t *testing.T) {
-	for _, allowed := range []string{"0.0.0.0/0", "::/0"} {
-		m, devices := newTestManager(t)
-		full := strings.Replace(file, "AllowedIPs = 10.99.1.0/24", "AllowedIPs = 10.99.1.0/24, "+allowed, 1)
-		if _, err := m.Import("everything", []byte(full)); err != nil {
-			t.Fatal(err)
-		}
-		err := m.Up(context.Background(), "everything")
-		if err == nil || !strings.Contains(err.Error(), "everything routes everything (AllowedIPs "+allowed+")") {
-			t.Errorf("got %v", err)
-		}
-		if len(*devices) != 0 {
-			t.Error("a device was started")
-		}
-	}
-}
-
 func TestFailureToStartNamesTheTunnel(t *testing.T) {
 	m, _ := newTestManager(t)
-	m.start = func(context.Context, *conf.Config) (device, error) {
+	m.start = func(context.Context, *conf.Config, func([]netip.Addr) error) (device, error) {
 		return nil, errors.New("the Endpoint vpn.example.com does not resolve; check the network or the Endpoint line")
 	}
 	mustImport(t, m, "work")
@@ -230,8 +216,16 @@ func newTestManager(t *testing.T) (*Manager, *fakeDevices) {
 		t.Fatal(err)
 	}
 	devices := &fakeDevices{}
-	start := func(context.Context, *conf.Config) (device, error) {
+	start := func(_ context.Context, c *conf.Config, beforeRoutes func([]netip.Addr) error) (device, error) {
 		dev := &fakeDevice{status: tunnel.Status{Interface: "utun2" + string(rune('0'+len(*devices)))}}
+		for _, peer := range c.Peers {
+			if addr, err := netip.ParseAddr(peer.Endpoint.Host); err == nil {
+				dev.status.Peers = append(dev.status.Peers, tunnel.PeerStatus{PublicKey: peer.PublicKey, Endpoint: netip.AddrPortFrom(addr, peer.Endpoint.Port)})
+			}
+		}
+		if err := beforeRoutes(dev.status.Endpoints()); err != nil {
+			return nil, err
+		}
 		*devices = append(*devices, dev)
 		return dev, nil
 	}
@@ -239,9 +233,51 @@ func newTestManager(t *testing.T) (*Manager, *fakeDevices) {
 		start:     start,
 		now:       func() time.Time { return now },
 		resolvers: &dns.Resolvers{Dir: filepath.Join(t.TempDir(), "resolver")},
+		bypass:    &fakeBypass{},
+		dnsAll:    &fakeDefaultDNS{set: map[string][]netip.Addr{}},
 		routes:    func() ([]routes.Route, error) { return nil, nil },
 	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	return m, devices
+}
+
+// fakeBypass keeps the last plan.
+type fakeBypass struct {
+	plans []bypass.Plan
+	fail  error
+}
+
+func (f *fakeBypass) Apply(p bypass.Plan) error {
+	f.plans = append(f.plans, p)
+	return f.fail
+}
+
+func (f *fakeBypass) last() bypass.Plan {
+	if len(f.plans) == 0 {
+		return bypass.Plan{}
+	}
+	return f.plans[len(f.plans)-1]
+}
+
+// fakeDefaultDNS keeps which tunnel's servers are the default.
+type fakeDefaultDNS struct {
+	set     map[string][]netip.Addr
+	cleared bool
+}
+
+func (f *fakeDefaultDNS) Set(tunnel string, servers []netip.Addr) error {
+	f.set[tunnel] = servers
+	return nil
+}
+
+func (f *fakeDefaultDNS) Clear(tunnel string) error {
+	delete(f.set, tunnel)
+	return nil
+}
+
+func (f *fakeDefaultDNS) ClearAll() error {
+	clear(f.set)
+	f.cleared = true
+	return nil
 }
 
 func mustImport(t *testing.T, m *Manager, name string) {
@@ -265,7 +301,7 @@ func assertState(t *testing.T, m *Manager, name string, want State) {
 func TestStatusAnswersWhileATunnelComesUp(t *testing.T) {
 	m, _ := newTestManager(t)
 	started, release := make(chan struct{}), make(chan struct{})
-	m.start = func(context.Context, *conf.Config) (device, error) {
+	m.start = func(context.Context, *conf.Config, func([]netip.Addr) error) (device, error) {
 		close(started)
 		<-release
 		return &fakeDevice{status: tunnel.Status{Interface: "utun30"}}, nil
@@ -293,7 +329,7 @@ func TestDownStopsATunnelComingUp(t *testing.T) {
 	m, _ := newTestManager(t)
 	started, release := make(chan struct{}), make(chan struct{})
 	dev := &fakeDevice{}
-	m.start = func(ctx context.Context, _ *conf.Config) (device, error) {
+	m.start = func(ctx context.Context, _ *conf.Config, _ func([]netip.Addr) error) (device, error) {
 		close(started)
 		<-release
 		return dev, nil
@@ -401,7 +437,7 @@ func TestOverlappingTunnelsAreRefused(t *testing.T) {
 func TestATunnelComingUpAlreadyHoldsItsNetworks(t *testing.T) {
 	m, _ := newTestManager(t)
 	started, release := make(chan struct{}), make(chan struct{})
-	m.start = func(context.Context, *conf.Config) (device, error) {
+	m.start = func(context.Context, *conf.Config, func([]netip.Addr) error) (device, error) {
 		close(started)
 		<-release
 		return &fakeDevice{}, nil
@@ -573,14 +609,14 @@ func TestAutostartKeepsTryingUntilTheTunnelComesUp(t *testing.T) {
 	failures := 2
 	start := m.start
 	var mu sync.Mutex
-	m.start = func(ctx context.Context, c *conf.Config) (device, error) {
+	m.start = func(ctx context.Context, c *conf.Config, beforeRoutes func([]netip.Addr) error) (device, error) {
 		mu.Lock()
 		defer mu.Unlock()
 		if failures > 0 {
 			failures--
 			return nil, errors.New("the Endpoint vpn.example.com does not resolve; check the network or the Endpoint line")
 		}
-		return start(ctx, c)
+		return start(ctx, c, beforeRoutes)
 	}
 	importText(t, m, "work", fileWith("10.99.1.0/24", ""))
 	importText(t, m, "manual", fileWith("10.99.2.0/24", ""))
@@ -601,7 +637,7 @@ func TestAutostartKeepsTryingUntilTheTunnelComesUp(t *testing.T) {
 func TestStatusExplainsAnAutostartStillTrying(t *testing.T) {
 	m, _ := newTestManager(t)
 	m.retryWait = time.Hour
-	m.start = func(context.Context, *conf.Config) (device, error) {
+	m.start = func(context.Context, *conf.Config, func([]netip.Addr) error) (device, error) {
 		return nil, errors.New("the Endpoint vpn.example.com does not resolve; check the network or the Endpoint line")
 	}
 	importText(t, m, "work", fileWith("10.99.1.0/24", ""))
@@ -624,7 +660,7 @@ func TestStatusExplainsAnAutostartStillTrying(t *testing.T) {
 func TestTunnelsFollowTheNetwork(t *testing.T) {
 	m, _ := newTestManager(t)
 	var followers []*followingDevice
-	m.start = func(context.Context, *conf.Config) (device, error) {
+	m.start = func(context.Context, *conf.Config, func([]netip.Addr) error) (device, error) {
 		d := &followingDevice{fakeDevice: fakeDevice{status: tunnel.Status{Interface: "utun30"}}}
 		followers = append(followers, d)
 		return d, nil
@@ -688,13 +724,212 @@ func TestAPersonAskingSeesOtherTunnelsAsTheyAreNow(t *testing.T) {
 	}
 }
 
-func TestFullTunnelsInSmallerPiecesWaitToo(t *testing.T) {
-	for _, allowed := range []string{"0.0.0.0/2, 64.0.0.0/2, 128.0.0.0/2, 192.0.0.0/2", "2000::/3", "10.0.0.0/7"} {
+// fullFile is a full tunnel's file: everything through 203.0.113.10, with DNS (if any) inside it.
+func fullFile(allowed, dns string) string {
+	text := strings.Replace(file, "AllowedIPs = 10.99.1.0/24", "AllowedIPs = "+allowed, 1)
+	text = strings.Replace(text, "Address = 10.99.1.2/24", "Address = 10.64.0.2/32", 1)
+	text = strings.Replace(text, "Endpoint = 127.0.0.1:51821", "Endpoint = 203.0.113.10:51820", 1)
+	if dns != "" {
+		text = strings.Replace(text, "\n[Peer]", "\nDNS = "+dns+"\n\n[Peer]", 1)
+	}
+	return text
+}
+
+// splitFile is a split tunnel's file reached at 198.51.100.7.
+func splitFile(allowed, dns string) string {
+	return strings.Replace(fileWith(allowed, dns), "Endpoint = 127.0.0.1:51821", "Endpoint = 198.51.100.7:51820", 1)
+}
+
+func addrs(list ...string) []netip.Addr {
+	var out []netip.Addr
+	for _, a := range list {
+		out = append(out, netip.MustParseAddr(a))
+	}
+	return out
+}
+
+func TestAFullTunnelComesUp(t *testing.T) {
+	m, devices := newTestManager(t)
+	importText(t, m, "manhattan", fullFile("0.0.0.0/0", "10.64.0.1"))
+	if err := m.Up(context.Background(), "manhattan"); err != nil {
+		t.Fatal(err)
+	}
+	b := m.bypass.(*fakeBypass)
+	want := bypass.Plan{Endpoints: addrs("203.0.113.10"), BlockIPv6: true}
+	if !reflect.DeepEqual(b.plans[0], want) {
+		t.Errorf("before its routes: plan %+v, want %+v", b.plans[0], want)
+	}
+	if !reflect.DeepEqual(b.last(), want) {
+		t.Errorf("once up: plan %+v, want %+v", b.last(), want)
+	}
+	if got := m.dnsAll.(*fakeDefaultDNS).set["manhattan"]; !reflect.DeepEqual(got, addrs("10.64.0.1")) {
+		t.Errorf("default DNS %v", got)
+	}
+	status, err := m.Status("manhattan")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if notes := strings.Join(status.Notes, "\n"); !strings.Contains(notes, "it routes all traffic") || !strings.Contains(notes, "IPv6 is blocked") {
+		t.Errorf("notes:\n%s", notes)
+	}
+
+	if err := m.Down("manhattan"); err != nil {
+		t.Fatal(err)
+	}
+	if !devices.last().closed || len(m.dnsAll.(*fakeDefaultDNS).set) != 0 || !reflect.DeepEqual(b.last(), bypass.Plan{}) {
+		t.Errorf("down left: closed %v, DNS %v, plan %+v", devices.last().closed, m.dnsAll.(*fakeDefaultDNS).set, b.last())
+	}
+}
+
+func TestAFullTunnelWithIPv6LetsItThrough(t *testing.T) {
+	for _, allowed := range []string{"0.0.0.0/0, ::/0", "0.0.0.0/1, 128.0.0.0/1, ::/1, 8000::/1", "0.0.0.0/2, 64.0.0.0/2, 128.0.0.0/2, 192.0.0.0/2, ::/0"} {
 		m, _ := newTestManager(t)
-		importText(t, m, "pieces", fileWith(allowed, ""))
-		if err := m.Up(context.Background(), "pieces"); err == nil || !strings.Contains(err.Error(), "routes everything") {
+		importText(t, m, "manhattan", fullFile(allowed, "10.64.0.1"))
+		if err := m.Up(context.Background(), "manhattan"); err != nil {
+			t.Fatalf("%s: %v", allowed, err)
+		}
+		if m.bypass.(*fakeBypass).last().BlockIPv6 {
+			t.Errorf("%s: IPv6 blocked", allowed)
+		}
+	}
+}
+
+func TestSplitTunnelsKeepWorkingBesideAFullTunnel(t *testing.T) {
+	for _, fullFirst := range []bool{true, false} {
+		m, _ := newTestManager(t)
+		importText(t, m, "manhattan", fullFile("0.0.0.0/0", "10.64.0.1"))
+		importText(t, m, "diner", splitFile("10.99.1.0/24", "10.99.1.1, diner.example"))
+		order := []string{"manhattan", "diner"}
+		if !fullFirst {
+			order = []string{"diner", "manhattan"}
+		}
+		for _, name := range order {
+			if err := m.Up(context.Background(), name); err != nil {
+				t.Fatalf("%s: %v", name, err)
+			}
+		}
+		got := m.bypass.(*fakeBypass).last().Endpoints
+		slices.SortFunc(got, netip.Addr.Compare)
+		if !reflect.DeepEqual(got, addrs("198.51.100.7", "203.0.113.10")) {
+			t.Errorf("full first %v: endpoints kept outside %v", fullFirst, got)
+		}
+		if _, err := os.Stat(filepath.Join(m.resolvers.Dir, "diner.example")); err != nil {
+			t.Errorf("the split tunnel's resolver file: %v", err)
+		}
+
+		if err := m.Down("manhattan"); err != nil {
+			t.Fatal(err)
+		}
+		if got := m.bypass.(*fakeBypass).last(); !reflect.DeepEqual(got, bypass.Plan{}) {
+			t.Errorf("with no full tunnel left: plan %+v", got)
+		}
+	}
+}
+
+func TestOneFullTunnelAtATime(t *testing.T) {
+	m, devices := newTestManager(t)
+	importText(t, m, "manhattan", fullFile("0.0.0.0/0", "10.64.0.1"))
+	importText(t, m, "brooklyn", strings.Replace(fullFile("0.0.0.0/0", "10.65.0.1"), "10.64.0.2/32", "10.65.0.2/32", 1))
+	if err := m.Up(context.Background(), "manhattan"); err != nil {
+		t.Fatal(err)
+	}
+	err := m.Up(context.Background(), "brooklyn")
+	if !errors.Is(err, ErrConflict) || !strings.Contains(err.Error(), "manhattan routes everything already") {
+		t.Errorf("got %v", err)
+	}
+	if len(*devices) != 1 {
+		t.Errorf("started %d devices", len(*devices))
+	}
+}
+
+func TestAnotherProgramsFullTunnelIsRefused(t *testing.T) {
+	m, _ := newTestManager(t)
+	m.routes = func() ([]routes.Route, error) {
+		return []routes.Route{{Prefix: netip.MustParsePrefix("0.0.0.0/1"), Interface: "utun9"}}, nil
+	}
+	importText(t, m, "manhattan", fullFile("0.0.0.0/0", "10.64.0.1"))
+	err := m.Up(context.Background(), "manhattan")
+	if !errors.Is(err, ErrConflict) || !strings.Contains(err.Error(), "utun9, another program's tunnel routes everything already") {
+		t.Errorf("got %v", err)
+	}
+}
+
+func TestTheLocalNetworkStaysBesideAFullTunnel(t *testing.T) {
+	m, _ := newTestManager(t)
+	m.routes = func() ([]routes.Route, error) {
+		return []routes.Route{
+			{Prefix: netip.MustParsePrefix("0.0.0.0/0"), Interface: "en0", Gateway: netip.MustParseAddr("192.168.1.1")},
+			{Prefix: netip.MustParsePrefix("192.168.1.0/24"), Interface: "en0"},
+		}, nil
+	}
+	importText(t, m, "manhattan", fullFile("0.0.0.0/0", "10.64.0.1"))
+	if err := m.Up(context.Background(), "manhattan"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAFullTunnelNeedsADNSServer(t *testing.T) {
+	m, devices := newTestManager(t)
+	importText(t, m, "manhattan", fullFile("0.0.0.0/0", ""))
+	err := m.Up(context.Background(), "manhattan")
+	if err == nil || !strings.Contains(err.Error(), "manhattan routes everything but names no DNS server") {
+		t.Errorf("got %v", err)
+	}
+	if len(*devices) != 0 {
+		t.Error("a device was started")
+	}
+}
+
+func TestASplitTunnelMayNotTakeTheFullTunnelsDNSServer(t *testing.T) {
+	m, _ := newTestManager(t)
+	importText(t, m, "manhattan", fullFile("0.0.0.0/0", "10.64.0.1"))
+	importText(t, m, "diner", splitFile("10.64.0.0/16", ""))
+	if err := m.Up(context.Background(), "manhattan"); err != nil {
+		t.Fatal(err)
+	}
+	err := m.Up(context.Background(), "diner")
+	if !errors.Is(err, ErrConflict) || !strings.Contains(err.Error(), "the full tunnel's DNS server 10.64.0.1 lies in diner's AllowedIPs 10.64.0.0/16") {
+		t.Errorf("got %v", err)
+	}
+}
+
+func TestWideTunnelsThatAreNotFullAreRefused(t *testing.T) {
+	for _, allowed := range []string{"0.0.0.0/1", "2000::/3", "10.0.0.0/7", "::/0", "0.0.0.0/2, 64.0.0.0/2, 128.0.0.0/2"} {
+		m, devices := newTestManager(t)
+		importText(t, m, "pieces", fullFile(allowed, "10.64.0.1"))
+		if err := m.Up(context.Background(), "pieces"); err == nil || !strings.Contains(err.Error(), "without routing all of it") {
 			t.Errorf("%s: got %v", allowed, err)
 		}
+		if len(*devices) != 0 {
+			t.Errorf("%s: a device was started", allowed)
+		}
+	}
+}
+
+func TestAFailedStartTakesTheBypassAway(t *testing.T) {
+	m, _ := newTestManager(t)
+	m.start = func(_ context.Context, _ *conf.Config, beforeRoutes func([]netip.Addr) error) (device, error) {
+		if err := beforeRoutes(addrs("203.0.113.10")); err != nil {
+			return nil, err
+		}
+		return nil, errors.New("WireGuard did not start on utun9")
+	}
+	importText(t, m, "manhattan", fullFile("0.0.0.0/0", "10.64.0.1"))
+	if err := m.Up(context.Background(), "manhattan"); err == nil {
+		t.Fatal("no error")
+	}
+	if got := m.bypass.(*fakeBypass).last(); !reflect.DeepEqual(got, bypass.Plan{}) {
+		t.Errorf("plan %+v", got)
+	}
+}
+
+func TestCleanUpRemovesWhatAFullTunnelLeft(t *testing.T) {
+	m, _ := newTestManager(t)
+	if err := m.CleanUp(); err != nil {
+		t.Fatal(err)
+	}
+	if !m.dnsAll.(*fakeDefaultDNS).cleared || len(m.bypass.(*fakeBypass).plans) != 1 || !reflect.DeepEqual(m.bypass.(*fakeBypass).last(), bypass.Plan{}) {
+		t.Error("CleanUp left the default resolver or the bypass routes")
 	}
 }
 

@@ -36,6 +36,49 @@ type resolver interface {
 	LookupNetIP(ctx context.Context, network, host string) ([]netip.Addr, error)
 }
 
+// halves are the routes that stand for a /0: together they take everything, and being more specific
+// than the default route they win over it without replacing it. Taking them away (or the tunnel's
+// interface going) leaves the Mac's own default route as it was.
+var halves = map[bool][2]netip.Prefix{
+	true:  {netip.MustParsePrefix("0.0.0.0/1"), netip.MustParsePrefix("128.0.0.0/1")},
+	false: {netip.MustParsePrefix("::/1"), netip.MustParsePrefix("8000::/1")},
+}
+
+// routes is every peer's AllowedIPs, as networks, each once; a /0 is its two halves.
+func routes(c *conf.Config) []netip.Prefix {
+	var routes []netip.Prefix
+	seen := map[netip.Prefix]bool{}
+	add := func(route netip.Prefix) {
+		if !seen[route] {
+			seen[route] = true
+			routes = append(routes, route)
+		}
+	}
+	for _, peer := range c.Peers {
+		for _, allowed := range peer.AllowedIPs {
+			if allowed.Bits() == 0 {
+				for _, half := range halves[allowed.Addr().Is4()] {
+					add(half)
+				}
+				continue
+			}
+			add(allowed.Masked())
+		}
+	}
+	return routes
+}
+
+// Endpoints are the addresses a running tunnel's peers are reached at, as its device reports them.
+func (s Status) Endpoints() []netip.Addr {
+	var addrs []netip.Addr
+	for _, peer := range s.Peers {
+		if peer.Endpoint.IsValid() {
+			addrs = append(addrs, peer.Endpoint.Addr().Unmap())
+		}
+	}
+	return addrs
+}
+
 // resolveEndpoints turns each peer's endpoint into an address, since the device takes only
 // addresses. IPv4 is preferred: it works on more networks.
 func resolveEndpoints(ctx context.Context, r resolver, peers []conf.Peer) ([]netip.AddrPort, error) {
@@ -67,7 +110,9 @@ func preferIPv4(addrs []netip.Addr) netip.Addr {
 }
 
 // checkEndpointsOutside refuses a tunnel whose own routes would carry the packets meant for its
-// endpoint: they would go round inside the tunnel and never arrive.
+// endpoint: they would go round inside the tunnel and never arrive. A full tunnel's wide networks
+// (wider than /8, or /16 for IPv6: adit refuses those unless they add up to everything) are the
+// exception: adit keeps its endpoints out with a host route of their own (package bypass).
 func checkEndpointsOutside(peers []conf.Peer, endpoints []netip.AddrPort) error {
 	for _, endpoint := range endpoints {
 		if !endpoint.IsValid() {
@@ -75,6 +120,9 @@ func checkEndpointsOutside(peers []conf.Peer, endpoints []netip.AddrPort) error 
 		}
 		for _, peer := range peers {
 			for _, allowed := range peer.AllowedIPs {
+				if allowed.Addr().Is4() && allowed.Bits() < 8 || allowed.Addr().Is6() && allowed.Bits() < 16 {
+					continue
+				}
 				if allowed.Masked().Contains(endpoint.Addr()) {
 					return fmt.Errorf("the Endpoint %s is inside AllowedIPs %s, so packets to it would be sent into the tunnel itself", endpoint.Addr(), allowed)
 				}

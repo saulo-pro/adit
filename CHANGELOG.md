@@ -7,6 +7,22 @@ notes of its GitHub release.
 
 ## [Unreleased]
 
+### Added
+
+- Full tunnels: a tunnel with `AllowedIPs = 0.0.0.0/0` (or pieces that add up to it) comes up beside
+  split tunnels. Everything goes through it but the local network and adit's other tunnels, which
+  keep their own networks and DNS domains; its DNS servers answer every other name. Each tunnel's
+  server is kept outside it, across network changes. One full tunnel at a time, and none while
+  another program's full tunnel is up.
+- A full tunnel that carries only IPv4 blocks IPv6 while it is up, so it cannot leave around the
+  tunnel.
+
+### Changed
+
+- A full tunnel needs a `DNS` line: without one, names would still be looked up outside it.
+- A tunnel that routes a large part of the internet but not all of it is refused, saying how to
+  write a full tunnel.
+
 ## [0.1.3] - 2026-11-27
 
 Security fixes from a full review of adit, its dependencies and how it is built and installed.

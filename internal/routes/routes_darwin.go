@@ -56,9 +56,28 @@ func read(keep func(iface string) bool) ([]Route, error) {
 		if !ok || ignored(prefix) {
 			continue
 		}
-		routes = append(routes, Route{Prefix: prefix, Interface: name})
+		routes = append(routes, Route{Prefix: prefix, Interface: name, Gateway: gateway(m, name)})
 	}
 	return routes, nil
+}
+
+// gateway is a route's next hop, when it is an address; a link-local one keeps its interface as
+// its zone, which /sbin/route needs to use it.
+func gateway(m *route.RouteMessage, iface string) netip.Addr {
+	if m.Flags&syscall.RTF_GATEWAY == 0 || len(m.Addrs) <= syscall.RTAX_GATEWAY {
+		return netip.Addr{}
+	}
+	switch gw := m.Addrs[syscall.RTAX_GATEWAY].(type) {
+	case *route.Inet4Addr:
+		return netip.AddrFrom4(gw.IP)
+	case *route.Inet6Addr:
+		addr := netip.AddrFrom16(gw.IP)
+		if addr.IsLinkLocalUnicast() {
+			addr = addr.WithZone(iface)
+		}
+		return addr
+	}
+	return netip.Addr{}
 }
 
 func destination(m *route.RouteMessage) (netip.Prefix, bool) {

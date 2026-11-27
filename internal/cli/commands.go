@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"text/tabwriter"
@@ -480,15 +481,25 @@ func whatItChanges(text []byte) string {
 			endpoints = append(endpoints, net.JoinHostPort(peer.Endpoint.Host, strconv.Itoa(int(peer.Endpoint.Port))))
 		}
 	}
+	full := slices.Contains(routes, "0.0.0.0/0")
+	i := c.Interface
+	servers := make([]string, len(i.DNS))
+	for n, server := range i.DNS {
+		servers[n] = server.String()
+	}
 	var b strings.Builder
-	if len(routes) > 0 {
+	switch {
+	case full:
+		fmt.Fprintf(&b, "When up, it routes everything (%s) but the local network and adit's other tunnels\n", strings.Join(routes, ", "))
+		if len(servers) > 0 {
+			fmt.Fprintf(&b, "and sends every name but the other tunnels' domains to %s\n", strings.Join(servers, ", "))
+		} else {
+			b.WriteString("but it needs a DNS line to come up: without one, names would be looked up outside it\n")
+		}
+	case len(routes) > 0:
 		fmt.Fprintf(&b, "When up, it routes: %s\n", strings.Join(routes, ", "))
 	}
-	if i := c.Interface; len(i.DNS) > 0 && len(i.DNSSearch) > 0 {
-		servers := make([]string, len(i.DNS))
-		for n, server := range i.DNS {
-			servers[n] = server.String()
-		}
+	if !full && len(i.DNS) > 0 && len(i.DNSSearch) > 0 {
 		fmt.Fprintf(&b, "and sends names under %s to %s\n", strings.Join(i.DNSSearch, ", "), strings.Join(servers, ", "))
 	}
 	if len(endpoints) > 0 {

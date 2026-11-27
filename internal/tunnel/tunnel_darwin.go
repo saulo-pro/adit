@@ -29,7 +29,10 @@ type Tunnel struct {
 // Start brings a tunnel up. Its addresses and routes are set the way wg-quick sets them on macOS,
 // with /sbin/ifconfig and /sbin/route and arguments built only from parsed addresses. Closing the
 // device removes the interface, and its routes with it.
-func Start(ctx context.Context, c *conf.Config, log *slog.Logger) (*Tunnel, error) {
+//
+// beforeRoutes, if not nil, runs once the endpoints are resolved and before any route goes in: a
+// full tunnel's routes would otherwise take its own handshake, and another tunnel's.
+func Start(ctx context.Context, c *conf.Config, beforeRoutes func(endpoints []netip.Addr) error, log *slog.Logger) (*Tunnel, error) {
 	endpoints, err := resolveEndpoints(ctx, net.DefaultResolver, c.Peers)
 	if err != nil {
 		return nil, err
@@ -59,6 +62,18 @@ func Start(ctx context.Context, c *conf.Config, log *slog.Logger) (*Tunnel, erro
 	if err := t.device.IpcSet(deviceConfig(c, endpoints)); err != nil {
 		t.Close()
 		return nil, fmt.Errorf("WireGuard refused the configuration: %w", err)
+	}
+	if beforeRoutes != nil {
+		var addrs []netip.Addr
+		for _, endpoint := range endpoints {
+			if endpoint.IsValid() {
+				addrs = append(addrs, endpoint.Addr())
+			}
+		}
+		if err := beforeRoutes(addrs); err != nil {
+			t.Close()
+			return nil, err
+		}
 	}
 	if err := t.device.Up(); err != nil {
 		t.Close()
@@ -170,21 +185,6 @@ func configure(iface string, mtu int, c *conf.Config) error {
 		return fmt.Errorf("the route to %s did not go in, probably because another interface already routes it; that traffic would not use the tunnel", missing[0])
 	}
 	return nil
-}
-
-// routes is every peer's AllowedIPs, as networks, each once.
-func routes(c *conf.Config) []netip.Prefix {
-	var routes []netip.Prefix
-	seen := map[netip.Prefix]bool{}
-	for _, peer := range c.Peers {
-		for _, allowed := range peer.AllowedIPs {
-			if route := allowed.Masked(); !seen[route] {
-				seen[route] = true
-				routes = append(routes, route)
-			}
-		}
-	}
-	return routes
 }
 
 // deviceLogger passes wireguard-go's errors on; its verbose lines are dropped. Some errors come once

@@ -97,7 +97,16 @@ func (m *Manager) keepTrying(ctx context.Context, t *store.Tunnel) {
 // new network and looks its endpoint names up again.
 func (m *Manager) NetworkChanged(ctx context.Context) {
 	m.each(ctx, func(name string, f follower) error { return f.NetworkChanged(ctx) })
+	m.followBypass()
 	m.Recheck()
+}
+
+// followBypass points the routes beside a full tunnel at the network as it is now: a move takes
+// host routes through the old gateway away, and an endpoint may resolve elsewhere.
+func (m *Manager) followBypass() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.reapplyBypass()
 }
 
 // ReresolveStale looks endpoint names up again for tunnels with no recent handshake: the server's
@@ -118,6 +127,7 @@ func (m *Manager) ReresolveStale(ctx context.Context) {
 		}
 		return f.Reresolve(ctx)
 	})
+	m.followBypass()
 }
 
 func (m *Manager) stale(peers []tunnel.PeerStatus) bool {

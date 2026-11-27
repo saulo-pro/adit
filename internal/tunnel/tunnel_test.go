@@ -96,6 +96,26 @@ func TestEndpointInsideAllowedIPsIsRefused(t *testing.T) {
 	}
 }
 
+func TestAFullTunnelKeepsItsEndpointOutByAHostRoute(t *testing.T) {
+	config := parse(t, strings.Replace(file, "AllowedIPs = 10.99.1.7/24, fd00:99:1::/64", "AllowedIPs = 0.0.0.0/0, ::/0", 1))
+	endpoints := []netip.AddrPort{netip.MustParseAddrPort("203.0.113.10:51820")}
+	if err := checkEndpointsOutside(config.Peers, endpoints); err != nil {
+		t.Errorf("a full tunnel's endpoint was refused: %v", err)
+	}
+}
+
+func TestAFullTunnelRoutesItsHalves(t *testing.T) {
+	config := parse(t, strings.Replace(file, "AllowedIPs = 10.99.1.7/24, fd00:99:1::/64", "AllowedIPs = 0.0.0.0/0, 0.0.0.0/1, ::/0, 10.99.1.0/24", 1))
+	var got []string
+	for _, route := range routes(config) {
+		got = append(got, route.String())
+	}
+	want := "0.0.0.0/1 128.0.0.0/1 ::/1 8000::/1 10.99.1.0/24"
+	if strings.Join(got, " ") != want {
+		t.Errorf("routes %v, want %s", got, want)
+	}
+}
+
 func TestParseStatus(t *testing.T) {
 	reported := "private_key=" + privateKeyHex + "\n" +
 		"listen_port=51900\n" +

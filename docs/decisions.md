@@ -203,3 +203,45 @@ High and Medium ones and most of the rest. Decisions it led to:
 Left for later, by choice: an Apple Developer ID with notarisation (the attestation covers
 provenance meanwhile), signing SHA256SUMS with a key install.sh pins, and a packet filter per tunnel.
 
+
+## 2026-11-27 — Full tunnels: routes, servers kept outside, default DNS
+
+A full tunnel (`AllowedIPs = 0.0.0.0/0`, or pieces that add up to it) comes up beside split tunnels.
+How it works was settled by comparing sixteen other clients and by three experiments in a virtual
+machine, before building:
+
+- **Routes.** `0.0.0.0/0` goes in as `0.0.0.0/1` and `128.0.0.0/1` (`::/0` as `::/1` and
+  `8000::/1`), as wg-quick does. They win over the default route without replacing it, so taking the
+  tunnel down, or aditd dying, leaves the Mac's own route as it was. Split tunnels' networks and the
+  local network are more specific and keep winning.
+- **Every tunnel's server stays outside it.** Without a route of its own, the full tunnel captures
+  the packets to its own server and nothing gets through. aditd adds a host route through the Mac's
+  real gateway for the server of every adit tunnel that is up, before the full tunnel's routes go in
+  (none for a server on the local network; one to nowhere when there is no gateway, so packets never
+  go round inside the tunnel). A network change removes host routes through the old gateway, so they
+  are checked and put back after every change and every minute. Routes adit adds outside a tunnel's
+  own interface are recorded in `/var/run/adit/routes.json` and removed by aditd at its next start
+  if it died.
+- **DNS.** The full tunnel's servers become the default resolver through the System Configuration
+  dynamic store: a key of adit's own, `State:/Network/Service/adit-NAME/DNS`, whose supplemental
+  match domain is the empty domain. macOS puts it ahead of the network's resolver; `/etc/resolver`
+  files still win for their domains, so split tunnels keep their DNS; `/etc/resolv.conf` follows;
+  removing the key restores the network's DNS at once. Three other ways did nothing, and changing the
+  network service's own keys broke resolution until the network was joined again, so adit never
+  touches keys that are not its own. wg-quick's way, rewriting every network service with
+  `networksetup`, leaves DNS overridden when it is killed.
+- **A DNS line is required.** A full tunnel without one would leave every name to the network's
+  resolver, outside the tunnel.
+- **IPv6.** A full tunnel that carries only IPv4 sends all IPv6 nowhere while it is up (`::/1` and
+  `8000::/1` to a blackhole), so it cannot leave around the tunnel.
+- **One full tunnel at a time.** A second one, adit's or another program's, is refused, naming it.
+  A split tunnel whose networks would take the full tunnel's DNS server is refused too.
+- **Not quite full is refused.** A tunnel routing a large part of the internet without all of it
+  (`0.0.0.0/1` alone, `10.0.0.0/7`, `::/0` without IPv4) is refused, saying how to write a full
+  tunnel.
+
+For now a full tunnel fails open: if it drops or aditd dies, traffic goes out directly, as with the
+WireGuard app. A kill switch comes next, as a pf anchor of aditd's: the experiments showed that
+anchors outlive the process that loaded them, that only root's packets can be let through to the
+tunnels' servers, that starting to block cuts connections already open, and that another program's
+anchor evaluated earlier can let traffic through adit's block.

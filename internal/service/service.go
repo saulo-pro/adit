@@ -14,8 +14,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/saulo-pro/adit/internal/bypass"
 	"github.com/saulo-pro/adit/internal/conf"
 	"github.com/saulo-pro/adit/internal/dns"
+	"github.com/saulo-pro/adit/internal/dnsdefault"
 	"github.com/saulo-pro/adit/internal/others"
 	"github.com/saulo-pro/adit/internal/routes"
 	"github.com/saulo-pro/adit/internal/store"
@@ -69,13 +71,29 @@ type device interface {
 	Close() error
 }
 
-type starter func(ctx context.Context, c *conf.Config) (device, error)
+// starter brings a tunnel up; beforeRoutes runs with its endpoints' addresses before its routes go
+// in.
+type starter func(ctx context.Context, c *conf.Config, beforeRoutes func(endpoints []netip.Addr) error) (device, error)
+
+// bypasser keeps the routes a full tunnel needs beside its own: bypass.Routes in aditd.
+type bypasser interface {
+	Apply(bypass.Plan) error
+}
+
+// defaultResolver makes a full tunnel's DNS servers the Mac's default: dnsdefault.Default in aditd.
+type defaultResolver interface {
+	Set(tunnel string, servers []netip.Addr) error
+	Clear(tunnel string) error
+	ClearAll() error
+}
 
 // system is everything the Manager reaches outside itself: the Mac in aditd, fakes in tests.
 type system struct {
 	start     starter
 	now       func() time.Time
 	resolvers *dns.Resolvers
+	bypass    bypasser
+	dnsAll    defaultResolver
 	routes    func() ([]routes.Route, error) // the routing table: other tunnels and the local network
 	others    func() []others.Tunnel         // other software's tunnels: the WireGuard app's, wg-quick's
 	retryWait time.Duration                  // the first pause between tries of an autostart tunnel
@@ -84,6 +102,7 @@ type system struct {
 type running struct {
 	dev    device
 	config *conf.Config
+	shape  shape
 	notes  []string
 	live   []string // what changed around it since it came up, as of the last check
 }
@@ -91,9 +110,11 @@ type running struct {
 // attempt is a tunnel coming up. Down and Remove cancel it; its own pointer tells Up whether the
 // attempt it began is still the current one.
 type attempt struct {
-	cancel context.CancelFunc
-	config *conf.Config
-	done   chan struct{} // closed once the attempt has finished and closed any device it made
+	cancel    context.CancelFunc
+	config    *conf.Config
+	shape     shape
+	endpoints []netip.Addr  // as resolved, once known: kept outside a full tunnel from the start
+	done      chan struct{} // closed once the attempt has finished and closed any device it made
 }
 
 type Manager struct {
@@ -114,8 +135,8 @@ type Manager struct {
 
 func New(st *store.Store, log *slog.Logger) *Manager {
 	return newManager(st, system{
-		start: func(ctx context.Context, c *conf.Config) (device, error) {
-			t, err := tunnel.Start(ctx, c, log)
+		start: func(ctx context.Context, c *conf.Config, beforeRoutes func([]netip.Addr) error) (device, error) {
+			t, err := tunnel.Start(ctx, c, beforeRoutes, log)
 			if err != nil {
 				return nil, err // not t: a nil *Tunnel in an interface is not nil
 			}
@@ -123,7 +144,15 @@ func New(st *store.Store, log *slog.Logger) *Manager {
 		},
 		now:       time.Now,
 		resolvers: &dns.Resolvers{Dir: dns.DefaultDir},
-		routes:    routes.All,
+		bypass: &bypass.Routes{StateFile: bypass.DefaultStateFile, Table: routes.All, Run: func(args ...string) ([]byte, error) {
+			return exec.Command("/sbin/route", args...).CombinedOutput()
+		}},
+		dnsAll: &dnsdefault.Default{Run: func(script string) ([]byte, error) {
+			command := exec.Command("/usr/sbin/scutil")
+			command.Stdin = strings.NewReader(script)
+			return command.CombinedOutput()
+		}},
+		routes: routes.All,
 		others: (&others.Finder{WireGuardDir: routes.WireGuardDir, Run: func(name string, args ...string) ([]byte, error) {
 			return exec.Command(name, args...).Output()
 		}}).All,
@@ -145,11 +174,12 @@ func newManager(st *store.Store, sys system, log *slog.Logger) *Manager {
 }
 
 // CleanUp removes what an aditd that stopped without cleaning up left behind. At start no tunnel
-// is up, so every resolver file adit wrote is stale; interfaces and routes die with the process.
+// is up, so every resolver file and default resolver adit set is stale, and so are the routes a
+// full tunnel needed beside its own; interfaces and their routes die with the process.
 func (m *Manager) CleanUp() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.resolvers.ClearAll()
+	return errors.Join(m.resolvers.ClearAll(), m.dnsAll.ClearAll(), m.bypass.Apply(bypass.Plan{}))
 }
 
 // Changes signals after every import, removal, up, down and autostart change. Signals coalesce: a
@@ -266,23 +296,38 @@ func (m *Manager) up(ctx context.Context, name string, r *retry) error {
 		m.mu.Unlock()
 		return nil
 	}
-	if route, full := fullTunnel(t.Config); full {
+	shape, err := shapeOf(t)
+	if err != nil {
 		m.mu.Unlock()
-		return fmt.Errorf("%s routes everything (AllowedIPs %s), and full tunnels come in a later version of adit; for now a tunnel must route only its own networks", t.Name, route)
+		return err
 	}
-	notes, err := m.check(t)
+	notes, err := m.check(t, shape)
 	if err != nil {
 		m.mu.Unlock()
 		return err
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	this := &attempt{cancel: cancel, config: t.Config, done: make(chan struct{})}
+	this := &attempt{cancel: cancel, config: t.Config, shape: shape, done: make(chan struct{})}
 	m.starting[t.Name] = this
 	m.notify()
 	m.mu.Unlock()
 
-	dev, err := m.start(ctx, t.Config)
+	// Before the tunnel's routes go in, its endpoints get routes of their own when a full tunnel is
+	// up or this is one: otherwise the full tunnel's routes would take the packets that carry it.
+	beforeRoutes := func(endpoints []netip.Addr) error {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		if m.starting[t.Name] != this {
+			return fmt.Errorf("taken down while it was coming up")
+		}
+		this.endpoints = endpoints
+		if err := m.applyBypass(); err != nil {
+			return fmt.Errorf("adit could not keep the endpoints outside the full tunnel: %w", err)
+		}
+		return nil
+	}
+	dev, err := m.start(ctx, t.Config, beforeRoutes)
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -299,23 +344,119 @@ func (m *Manager) up(ctx context.Context, name string, r *retry) error {
 	}()
 	switch {
 	case err != nil:
+		m.reapplyBypass()
 		return fmt.Errorf("%s did not come up: %w", t.Name, err)
 	case !current:
 		dev.Close()
+		m.reapplyBypass()
 		return fmt.Errorf("%s was taken down while it was coming up", t.Name)
 	}
 	i := t.Config.Interface
-	if err := m.resolvers.Set(t.Name, i.DNS, domains(t.Config)); err != nil {
+	if shape.full {
+		err = m.dnsAll.Set(t.Name, i.DNS)
+	} else {
+		err = m.resolvers.Set(t.Name, i.DNS, domains(t.Config))
+	}
+	if err != nil {
 		dev.Close()
+		m.reapplyBypass()
 		return fmt.Errorf("%s did not come up, since its DNS could not be set: %w", t.Name, err)
 	}
-	m.running[t.Name] = &running{dev: dev, config: t.Config, notes: notes}
-	m.log.Info("tunnel up", "tunnel", t.Name, "interface", dev.Interface())
+	m.running[t.Name] = &running{dev: dev, config: t.Config, shape: shape, notes: notes}
+	m.reapplyBypass()
+	m.log.Info("tunnel up", "tunnel", t.Name, "interface", dev.Interface(), "full", shape.full)
 	return nil
 }
 
-// fullTunnel finds AllowedIPs that route everywhere, or a large part of it, which needs the endpoint
-// kept outside the tunnel across network changes: milestone 2. It judges what the networks cover
+// shape is what kind of tunnel a configuration makes.
+type shape struct {
+	full bool // routes everything: all of IPv4, and maybe all of IPv6
+	ipv6 bool // a full tunnel that carries IPv6 too; otherwise native IPv6 is blocked while it is up
+}
+
+// shapeOf tells a full tunnel from a split one, and refuses the shapes adit does not run: most of the
+// internet but not all of it, all of IPv6 without IPv4, and a full tunnel with no DNS server, which
+// would leave every name to the network's resolver, outside the tunnel.
+func shapeOf(t *store.Tunnel) (shape, error) {
+	full4, full6 := covers(t.Config)
+	if !full4 {
+		if route, wide := fullTunnel(t.Config); wide {
+			return shape{}, fmt.Errorf("%s routes a large part of the internet (AllowedIPs %s) without routing all of it; adit runs a full tunnel as AllowedIPs = 0.0.0.0/0 (and ::/0 for IPv6), or a tunnel that routes only its own networks", t.Name, route)
+		}
+		return shape{}, nil
+	}
+	if len(t.Config.Interface.DNS) == 0 {
+		return shape{}, fmt.Errorf("%s routes everything but names no DNS server, so names would still be looked up outside the tunnel; add a line such as DNS = 10.64.0.1 with the server its provider gives", t.Name)
+	}
+	return shape{full: true, ipv6: full6}, nil
+}
+
+// covers says whether a config's networks take all of IPv4, and all of IPv6, as a /0 or as pieces.
+func covers(c *conf.Config) (all4, all6 bool) {
+	var covered4 uint64
+	halves6 := 0
+	for _, network := range merged(networks(c)) {
+		switch {
+		case network.Addr().Is4():
+			covered4 += 1 << (32 - network.Bits())
+		case network.Bits() == 0:
+			halves6 += 2
+		case network.Bits() == 1:
+			halves6++
+		}
+	}
+	return covered4 == 1<<32, halves6 >= 2
+}
+
+// own are the networks a tunnel serves besides everything: a full tunnel's catch-all networks are
+// left out, since every more specific route (the local network's, a split tunnel's) wins over them.
+func own(c *conf.Config, s shape) []netip.Prefix {
+	if !s.full {
+		return networks(c)
+	}
+	var mine []netip.Prefix
+	for _, network := range networks(c) {
+		if network.Addr().Is4() && network.Bits() >= 8 || network.Addr().Is6() && network.Bits() >= 16 {
+			mine = append(mine, network)
+		}
+	}
+	return mine
+}
+
+// applyBypass gives the routing table what a full tunnel needs beside its own, or takes it away when
+// none is up or coming up. Called with m.mu held.
+func (m *Manager) applyBypass() error {
+	var plan bypass.Plan
+	full := false
+	var endpoints []netip.Addr
+	for _, r := range m.running {
+		if r.shape.full {
+			full, plan.BlockIPv6 = true, !r.shape.ipv6
+		}
+		if status, err := r.dev.Status(); err == nil {
+			endpoints = append(endpoints, status.Endpoints()...)
+		}
+	}
+	for _, a := range m.starting {
+		if a.shape.full {
+			full, plan.BlockIPv6 = true, !a.shape.ipv6
+		}
+		endpoints = append(endpoints, a.endpoints...)
+	}
+	if full {
+		plan.Endpoints = endpoints
+	}
+	return m.bypass.Apply(plan)
+}
+
+// reapplyBypass is applyBypass where a failure can only be logged. Called with m.mu held.
+func (m *Manager) reapplyBypass() {
+	if err := m.applyBypass(); err != nil {
+		m.log.Warn("the routes beside the full tunnel are not as they should be", "error", err)
+	}
+}
+
+// fullTunnel finds AllowedIPs that route everywhere, or a large part of it. It judges what the networks cover
 // together, not one at a time: two /1 halves, four /2 networks or 2000::/3 are full tunnels too. A
 // network wider than /8 (IPv4) or /16 (IPv6), or IPv4 networks covering half the space, count.
 func fullTunnel(c *conf.Config) (netip.Prefix, bool) {
@@ -356,22 +497,49 @@ func merged(all []netip.Prefix) []netip.Prefix {
 
 // check refuses a tunnel whose networks or DNS domains another tunnel already has, adit's or
 // another program's, and returns notes about what the tunnel shares. Called with m.mu held.
-func (m *Manager) check(t *store.Tunnel) ([]string, error) {
-	mine := networks(t.Config)
+func (m *Manager) check(t *store.Tunnel, s shape) ([]string, error) {
+	mine := own(t.Config, s)
 	myDomains := domains(t.Config)
+	if s.full {
+		myDomains = nil // its servers answer every name, through dnsdefault
+	}
 
-	for name, config := range m.siblings(t.Name) {
+	for name, sibling := range m.siblings(t.Name) {
+		config := sibling.config
+		if s.full && sibling.shape.full {
+			return nil, conflict("%s routes everything already, and adit runs one full tunnel at a time; take %s down first", name, name)
+		}
+		// The full tunnel's DNS servers must stay inside it: a split tunnel taking one would answer
+		// for every name.
+		for _, pair := range []struct {
+			full  *conf.Config
+			fullS shape
+			split *conf.Config
+			name  string
+		}{{t.Config, s, config, name}, {config, sibling.shape, t.Config, t.Name}} {
+			if !pair.fullS.full {
+				continue
+			}
+			for _, server := range pair.full.Interface.DNS {
+				for _, b := range networks(pair.split) {
+					if b.Contains(server) {
+						return nil, conflict("the full tunnel's DNS server %s lies in %s's AllowedIPs %s, so every name would be looked up through %s; take one of them down first, or change AllowedIPs", server, pair.name, b, pair.name)
+					}
+				}
+			}
+		}
 		for _, a := range mine {
-			for _, b := range networks(config) {
+			for _, b := range own(config, sibling.shape) {
 				if a.Overlaps(b) {
 					return nil, conflict("%s's AllowedIPs %s overlaps %s of %s, which is up; take %s down first, or change one of them", t.Name, a, b, name, name)
 				}
 			}
 		}
 		// A tunnel's own address inside another's networks would make the two answer for it.
-		for _, pair := range [][2]*conf.Config{{t.Config, config}, {config, t.Config}} {
-			for _, address := range pair[0].Interface.Addresses {
-				for _, b := range networks(pair[1]) {
+		me, them := upTunnel{t.Config, s}, sibling
+		for _, pair := range [][2]upTunnel{{me, them}, {them, me}} {
+			for _, address := range pair[0].config.Interface.Addresses {
+				for _, b := range own(pair[1].config, pair[1].shape) {
 					if b.Contains(address.Addr()) {
 						return nil, conflict("the address %s of one of %s and %s lies in the other's AllowedIPs %s; take %s down first, or change one of them", address.Addr(), t.Name, name, b, name)
 					}
@@ -379,13 +547,17 @@ func (m *Manager) check(t *store.Tunnel) ([]string, error) {
 			}
 		}
 		// A name looked up through another tunnel's DNS would let that tunnel's server choose where
-		// this one connects.
-		for _, pair := range [][2]*conf.Config{{t.Config, config}, {config, t.Config}} {
-			for _, peer := range pair[0].Peers {
+		// this one connects. A full tunnel's servers answer every name, by design: that is the trust
+		// a full tunnel asks for.
+		for _, pair := range [][2]upTunnel{{me, them}, {them, me}} {
+			if pair[1].shape.full {
+				continue
+			}
+			for _, peer := range pair[0].config.Peers {
 				if _, err := netip.ParseAddr(peer.Endpoint.Host); err == nil || peer.Endpoint.IsZero() {
 					continue
 				}
-				for _, d := range domains(pair[1]) {
+				for _, d := range domains(pair[1].config) {
 					if sameDomain(peer.Endpoint.Host, d) {
 						return nil, conflict("the endpoint %s is under the DNS domain %s that one of %s and %s resolves through its tunnel; take %s down first", peer.Endpoint.Host, d, t.Name, name, name)
 					}
@@ -393,6 +565,9 @@ func (m *Manager) check(t *store.Tunnel) ([]string, error) {
 			}
 		}
 		for _, d := range myDomains {
+			if sibling.shape.full {
+				break
+			}
 			for _, e := range domains(config) {
 				if sameDomain(d, e) {
 					return nil, conflict("%s's DNS domain %s is already resolved through %s, which is up; take %s down first", t.Name, d, name, name)
@@ -422,6 +597,9 @@ func (m *Manager) check(t *store.Tunnel) ([]string, error) {
 			continue
 		}
 		if routes.CatchAll(route.Prefix) {
+			if s.full {
+				return nil, conflict("%s routes everything already, and the Mac can follow only one full tunnel; take it down first", m.describe(route.Interface))
+			}
 			if note := endpointNote(t, route, m.describe(route.Interface)); note != "" && !noted[route.Interface] {
 				noted[route.Interface] = true
 				notes = append(notes, note)
@@ -476,9 +654,16 @@ func (m *Manager) Recheck() {
 	changed := false
 	for name, r := range m.running {
 		var live []string
-		mine := networks(r.config)
+		mine := own(r.config, r.shape)
 		for _, route := range table {
 			if ours[route.Interface] {
+				continue
+			}
+			if r.shape.full && routes.TunnelInterface(route.Interface) && routes.CatchAll(route.Prefix) {
+				note := fmt.Sprintf("%s now routes everything too, so traffic may not use %s", m.describe(route.Interface), name)
+				if !slices.Contains(live, note) {
+					live = append(live, note)
+				}
 				continue
 			}
 			if !routes.TunnelInterface(route.Interface) {
@@ -508,17 +693,22 @@ func (m *Manager) Recheck() {
 	}
 }
 
-// siblings are the configs of adit's tunnels that are up or coming up, other than name.
-func (m *Manager) siblings(name string) map[string]*conf.Config {
-	configs := map[string]*conf.Config{}
+type upTunnel struct {
+	config *conf.Config
+	shape  shape
+}
+
+// siblings are adit's tunnels that are up or coming up, other than name.
+func (m *Manager) siblings(name string) map[string]upTunnel {
+	all := map[string]upTunnel{}
 	for other, r := range m.running {
-		configs[other] = r.config
+		all[other] = upTunnel{r.config, r.shape}
 	}
 	for other, a := range m.starting {
-		configs[other] = a.config
+		all[other] = upTunnel{a.config, a.shape}
 	}
-	delete(configs, name)
-	return configs
+	delete(all, name)
+	return all
 }
 
 // endpointNote says when another program's full tunnel will probably carry this tunnel's own
@@ -560,8 +750,20 @@ func sameDomain(a, b string) bool {
 	return dns.Overlap(a, b)
 }
 
+// fullNotes say what a full tunnel does while it is up.
+func fullNotes(s shape) []string {
+	notes := []string{"it routes all traffic but the local network's and adit's other tunnels', and its DNS servers answer every name but the other tunnels' domains; if it drops, traffic goes out directly"}
+	if !s.ipv6 {
+		notes = append(notes, "IPv6 is blocked while it is up, since it carries only IPv4")
+	}
+	return notes
+}
+
 // dnsNotes say when a DNS line does nothing: adit scopes DNS to domains.
 func dnsNotes(c *conf.Config) []string {
+	if full4, _ := covers(c); full4 {
+		return nil // its servers answer every name
+	}
 	i := c.Interface
 	switch {
 	case len(i.DNS) > 0 && len(i.DNSSearch) == 0:
@@ -603,13 +805,21 @@ func (m *Manager) down(name string) {
 	}
 	if r, up := m.running[name]; up {
 		// DNS goes first: names must not go on to the tunnel's servers once it cannot reach them.
-		if err := m.resolvers.Clear(name); err != nil {
-			m.log.Warn("resolver files left behind", "tunnel", name, "error", err)
+		if err := m.clearDNS(name, r.shape); err != nil {
+			m.log.Warn("DNS settings left behind", "tunnel", name, "error", err)
 		}
 		r.dev.Close()
 		delete(m.running, name)
 		m.log.Info("tunnel down", "tunnel", name)
 	}
+	m.reapplyBypass()
+}
+
+func (m *Manager) clearDNS(name string, s shape) error {
+	if s.full {
+		return m.dnsAll.Clear(name)
+	}
+	return m.resolvers.Clear(name)
 }
 
 // SetAutostart chooses whether a tunnel comes up when aditd starts.
@@ -679,6 +889,9 @@ func (m *Manager) status(t *store.Tunnel) (Status, error) {
 		}
 		return status, nil
 	}
+	if r.shape.full {
+		status.Notes = fullNotes(r.shape)
+	}
 	status.Notes = append(status.Notes, r.notes...)
 	status.Notes = append(status.Notes, r.live...)
 
@@ -731,9 +944,10 @@ func (m *Manager) Close() error {
 	clear(m.starting)
 	var errs []error
 	for name, r := range m.running {
-		errs = append(errs, r.dev.Close(), m.resolvers.Clear(name))
+		errs = append(errs, m.clearDNS(name, r.shape), r.dev.Close())
 		delete(m.running, name)
 	}
+	errs = append(errs, m.bypass.Apply(bypass.Plan{}))
 	m.notify()
 	return errors.Join(errs...)
 }
