@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/saulo-pro/adit/internal/conf"
 	"io"
 	"io/fs"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -160,9 +162,10 @@ func (c *CLI) importFile(ctx context.Context, out *output, args []string) error 
 	}
 	var words strings.Builder
 	for _, warning := range resp.Warnings {
-		fmt.Fprintf(c.Stderr, "adit: %s\n", warning)
+		fmt.Fprintf(c.Stderr, "adit: %s\n", safeForTerminal(warning))
 	}
 	fmt.Fprintf(&words, "Imported %s. Bring it up with: adit up %s\n", resp.Tunnel.Name, resp.Tunnel.Name)
+	words.WriteString(whatItChanges(text))
 	warnings := resp.Warnings
 	if warnings == nil {
 		warnings = []string{}
@@ -457,6 +460,39 @@ func notes(t api.Tunnel) string {
 	var b strings.Builder
 	for _, note := range t.Notes {
 		fmt.Fprintf(&b, "  Note: %s.\n", note)
+	}
+	return b.String()
+}
+
+// whatItChanges says what a tunnel will change on the Mac once up, from its file: the administrator
+// should know before any member of the adit group brings it up.
+func whatItChanges(text []byte) string {
+	c, err := conf.Parse(text)
+	if err != nil {
+		return ""
+	}
+	var routes, endpoints []string
+	for _, peer := range c.Peers {
+		for _, network := range peer.AllowedIPs {
+			routes = append(routes, network.Masked().String())
+		}
+		if !peer.Endpoint.IsZero() {
+			endpoints = append(endpoints, net.JoinHostPort(peer.Endpoint.Host, strconv.Itoa(int(peer.Endpoint.Port))))
+		}
+	}
+	var b strings.Builder
+	if len(routes) > 0 {
+		fmt.Fprintf(&b, "When up, it routes: %s\n", strings.Join(routes, ", "))
+	}
+	if i := c.Interface; len(i.DNS) > 0 && len(i.DNSSearch) > 0 {
+		servers := make([]string, len(i.DNS))
+		for n, server := range i.DNS {
+			servers[n] = server.String()
+		}
+		fmt.Fprintf(&b, "and sends names under %s to %s\n", strings.Join(i.DNSSearch, ", "), strings.Join(servers, ", "))
+	}
+	if len(endpoints) > 0 {
+		fmt.Fprintf(&b, "Its server: %s\n", strings.Join(endpoints, ", "))
 	}
 	return b.String()
 }

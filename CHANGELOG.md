@@ -49,6 +49,14 @@ notes of its GitHub release.
 - After a network change, a tunnel's UDP socket comes back even if its port was taken meanwhile;
   taking a tunnel down while it is coming up waits for it to let go of its device, and DNS for a
   tunnel stops before its device does. Tunnel names match with ASCII case folding only.
+- The command line escapes terminal control characters in everything it prints, other programs'
+  tunnel names are cleaned up before they are shown, and `import` says what the tunnel will route
+  and where its DNS and server are. The menu bar icon acts only on real clicks, and shows `!`
+  instead of a tunnel count while `aditd` cannot be reached.
+- `install.sh` copies the archive into a folder only root can enter, checks it there and installs
+  from there, calls every tool by its full path, accepts only HTTPS, refuses an `ADIT_VERSION` that
+  is not a version, and no longer has a test-only download switch.
+- The landing page allows only its analytics script, and lets it report only to Cloudflare.
 
 ### Changed
 
