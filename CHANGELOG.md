@@ -7,6 +7,11 @@ notes of its GitHub release.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-27
+
+Full tunnels, beside split tunnels, with a kill switch. After upgrading, run `sudo adit install`
+again (Homebrew) or the one-line installer.
+
 ### Added
 
 - Full tunnels: a tunnel with `AllowedIPs = 0.0.0.0/0` (or pieces that add up to it) comes up beside
@@ -153,6 +158,7 @@ The first version, for macOS.
 - Homebrew: `brew install saulo-pro/tap/adit`.
 - Full tunnels (`AllowedIPs = 0.0.0.0/0`) are refused for now, saying so.
 
-[Unreleased]: https://github.com/saulo-pro/adit/compare/v0.1.3...HEAD
+[Unreleased]: https://github.com/saulo-pro/adit/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/saulo-pro/adit/compare/v0.1.3...v0.2.0
 [0.1.3]: https://github.com/saulo-pro/adit/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/saulo-pro/adit/releases/tag/v0.1.2

@@ -4,7 +4,8 @@
 # own Mac, where it would install adit and turn off automatic login.
 #
 #   vm-guest before-reboot   install, three test servers, traffic, PostUp, status --json, autostart
-#   vm-guest after-reboot    nobody logged in, both tunnels back and passing traffic, then uninstall
+#   vm-guest after-reboot    nobody logged in, both tunnels back and passing traffic, a full tunnel
+#                            beside them with its kill switch, then uninstall
 #
 # adit is installed with install.sh: from the release test/vm built, in ./release, or, with
 # ADIT_FROM=release, with the landing page's own line, curl -fsSL https://adit.saulo.pro/install.sh | sh.
@@ -202,7 +203,77 @@ after_reboot() {
   nobody_logged_in
   echo "still nobody logged in"
 
+  full_tunnel
   uninstall
+}
+
+# internet says whether a well-known server answers outside every tunnel: the machine reaches the
+# internet through tart's network, while the test servers answer only their own addresses.
+internet() {
+  nc -z -G 3 1.1.1.1 443 > /dev/null 2>&1
+}
+
+kill_switch_on() {
+  sudo pfctl -a com.apple/000.adit -s rules 2> /dev/null | grep -q '^block return out quick all'
+}
+
+full_tunnel() {
+  step "a full tunnel, manhattan, beside the two split tunnels"
+  server test4 10.99.4.1 51824
+  sed 's/^AllowedIPs = .*/AllowedIPs = 0.0.0.0\/0/' "$servers/test4/test4.conf" > "$HOME/manhattan.conf"
+  internet || fail "the machine does not reach the internet before the full tunnel"
+  expect 0 sudo adit import "$HOME/manhattan.conf" --name manhattan
+  expect 0 adit up manhattan
+  wait_up manhattan
+  adit route 1.1.1.1 | grep -q "goes through manhattan" || fail "1.1.1.1 does not go through manhattan: $(adit route 1.1.1.1)"
+  internet && fail "1.1.1.1 was reached outside the full tunnel"
+  for n in 0 1; do
+    traffic "$n"
+  done
+  ping -c 3 -t 5 10.99.4.1 > /dev/null || fail "10.99.4.1 does not answer through manhattan"
+  dscacheutil -q host -a name www.test4.adit.test | grep -q "ip_address: 10.99.4.1" ||
+    fail "www.test4.adit.test, under no tunnel's domain, is not answered by manhattan's DNS"
+  adit route www.test1.adit.test | grep -q "looked up by test1's DNS" || fail "test1's names left test1's DNS"
+  route -n get -inet6 2001:db8::1 2> /dev/null | grep -q BLACKHOLE || fail "IPv6 is not blocked beside an IPv4-only full tunnel"
+  adit list | grep -q "Everything goes through manhattan, except test1, test2 and the local network" ||
+    fail "adit list does not say where traffic goes: $(adit list)"
+  echo "everything goes through manhattan; test1 and test2 keep their networks and DNS; IPv6 is blocked"
+
+  step "the kill switch: aditd dies, the Mac stays blocked, and the next aditd brings manhattan back"
+  kill_switch_on || fail "the kill switch is not on while manhattan is up"
+  local pid
+  pid=$(sudo launchctl print "system/$label" | awk '/pid =/{print $3}')
+  sudo kill -9 "$pid"
+  kill_switch_on || fail "the kill switch went with aditd"
+  internet && fail "the internet was reached with aditd dead"
+  wait_up manhattan
+  ping -c 3 -t 5 10.99.4.1 > /dev/null || fail "manhattan came back but passes no traffic"
+  echo "blocked while aditd was down; aditd came back and brought manhattan up by itself"
+
+  step "the local network: blocked with lan block, back with lan allow"
+  # Run as one command: while the local network is blocked, this ssh session from the host is too.
+  sudo sh -c 'adit lan manhattan block > /dev/null; sleep 1
+    ping -c 2 -t 3 192.168.64.1 > /dev/null 2>&1 && echo reached || echo blocked
+    adit lan manhattan allow > /dev/null' > "$HOME/lan.txt" 2>&1
+  [[ $(cat "$HOME/lan.txt") == blocked ]] || fail "lan block did not block the local network: $(cat "$HOME/lan.txt")"
+  ping -c 2 -t 3 192.168.64.1 > /dev/null || fail "lan allow did not let the local network back"
+  echo "the gateway was unreachable with lan block, and is reachable again"
+
+  step "always: blocked while down by choice; signin lifts it; off lets go"
+  expect 0 sudo adit killswitch manhattan always
+  expect 0 adit down manhattan
+  internet && fail "the internet was reached with manhattan down and the kill switch always on"
+  adit status manhattan | grep -q "the internet is blocked until manhattan is up" || fail "status does not say it blocks"
+  expect 0 adit signin
+  internet || fail "signin did not lift the kill switch"
+  echo "signin lifted it; waiting for it to come back"
+  sleep 125
+  internet && fail "the kill switch did not come back after signing in"
+  expect 0 sudo adit killswitch manhattan off
+  internet || fail "killswitch off did not let the internet back"
+  kill_switch_on && fail "the anchor is still loaded"
+  expect 0 sudo adit remove manhattan
+  echo "always blocked while down, signin lifted it for 2 minutes, off let go"
 }
 
 uninstall() {

@@ -116,7 +116,15 @@ func (f *Firewall) Guards() ([]string, error) {
 // loaded says whether the anchor holds rules now.
 func (f *Firewall) loaded() bool {
 	output, err := f.Run("", "-a", f.Anchor, "-s", "rules")
-	return err == nil && strings.Contains(string(output), "block ")
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(string(output), "\n") {
+		if strings.HasPrefix(line, "pass ") || strings.HasPrefix(line, "block ") {
+			return true
+		}
+	}
+	return false
 }
 
 // lan is the local network as the market's "allow LAN" means it: private, link-local and multicast

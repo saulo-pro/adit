@@ -76,11 +76,14 @@
   <h2>What it does</h2>
   <div class="grid">
     <div class="card"><h3>Several tunnels at once</h3><p>Each routes only its own networks. A tunnel whose networks or DNS domain overlap one that is up, adit's or another program's, is refused before it connects, with the reason.</p></div>
+    <div class="card"><h3>A full tunnel beside them</h3><p><code>AllowedIPs = 0.0.0.0/0</code> takes everything but the local network and the other tunnels, which keep their networks and DNS. Every tunnel's server stays outside it, and IPv6 is blocked if it carries only IPv4.</p></div>
+    <div class="card"><h3>A kill switch</h3><p>On by default: while the full tunnel is coming up or has dropped, nothing leaves the Mac around it. <code>always</code> blocks even while it is down; <code>adit signin</code> lifts it for a hotel's sign-in page.</p></div>
+    <div class="card"><h3>Which tunnel carries this?</h3><p><code>adit route git.corp.example</code> names the tunnel an address or a name goes through, and the DNS server that looks it up.</p></div>
     <div class="card"><h3>Menu bar and command line, one state</h3><p>Both talk to one privileged service, <code>aditd</code>, so a tunnel switched in one flips in the other at once.</p></div>
     <div class="card"><h3>JSON for scripts and agents</h3><p>Every command answers in plain words, or in JSON with <code>--json</code>, with exit codes that mean something.</p></div>
     <div class="card"><h3>Back after a reboot</h3><p>The tunnels you choose come up at boot, before anyone logs in, and follow network changes.</p></div>
     <div class="card"><h3>No password for daily use</h3><p>The administrator password is asked once, at install. Switching tunnels needs none.</p></div>
-    <div class="card"><h3>DNS per tunnel</h3><p><code>DNS = 10.99.1.1, corp.example</code> sends names under <code>corp.example</code> to <code>10.99.1.1</code> and leaves every other name alone.</p></div>
+    <div class="card"><h3>DNS per tunnel</h3><p><code>DNS = 10.99.1.1, corp.example</code> sends names under <code>corp.example</code> to <code>10.99.1.1</code> and leaves every other name alone, or to the full tunnel's servers.</p></div>
     <div class="card"><h3>Honest status</h3><p>The last handshake and the bytes each way, not just “connected”.</p></div>
     <div class="card"><h3>Plain .conf files</h3><p>The same WireGuard files <code>wg-quick</code> and the official apps read, in and out. No lock-in.</p></div>
     <div class="card"><h3>Other tunnels, read-only</h3><p>The WireGuard app's and <code>wg-quick</code>'s tunnels are shown, with <code>wg-quick</code>'s handshakes and counters. adit never changes them.</p></div>
@@ -100,7 +103,14 @@ adit up work                   # no password
 adit status                    # every tunnel, adit's and other software's
 adit status work --json
 adit autostart work on         # bring it up at boot
+adit route git.corp.example    # which tunnel carries it, and who looks it up
 adit down work
+
+sudo adit import home.conf     # a full tunnel: AllowedIPs = 0.0.0.0/0 and a DNS line
+adit up home                   # everything goes through it, beside work
+sudo adit killswitch home always   # on-drop (default), always or off
+sudo adit lan home block       # allow (default) or block the local network
+adit signin                    # lift the kill switch for 2 minutes: hotel sign-in pages
 sudo adit export work --output work.conf   # a new file, readable only by you
 sudo adit remove work
 sudo adit allow caroline         # let another account switch tunnels
@@ -118,14 +128,14 @@ sudo adit uninstall            # removes aditd, the group and every tunnel with 
   <h2>How it is built</h2>
   <table>
     <tr><th>Part</th><th>What it does</th></tr>
-    <tr><td><code>aditd</code></td><td>The root service, started at boot by a LaunchDaemon. It runs each tunnel with <a href="https://git.zx2c4.com/wireguard-go">wireguard-go</a> on its own <code>utun</code> interface and sets addresses and routes the way <code>wg-quick</code> does.</td></tr>
+    <tr><td><code>aditd</code></td><td>The root service, started at boot by a LaunchDaemon. It runs each tunnel with <a href="https://git.zx2c4.com/wireguard-go">wireguard-go</a> on its own <code>utun</code> interface and sets addresses and routes the way <code>wg-quick</code> does. A full tunnel's kill switch is a pf anchor of its own, which outlives <code>aditd</code>.</td></tr>
     <tr><td><code>adit</code></td><td>The command line, a client of <code>aditd</code>'s socket.</td></tr>
     <tr><td>Menu bar icon</td><td>Another client of the same socket.</td></tr>
   </table>
   <p>Written in Go, MIT licensed.</p>
 
   <h2>Status</h2>
-  <p>0.1.3 is the current version. Full tunnels (<code>AllowedIPs = 0.0.0.0/0</code>) come in the next version: adit refuses them for now, saying so.</p>
+  <p>0.2.0 is the current version: full tunnels beside split tunnels, with a kill switch. Releases are listed on <a href="https://github.com/saulo-pro/adit/releases">GitHub</a>.</p>
   <p>Read <a href="https://github.com/saulo-pro/adit/blob/main/docs/brief.md">the brief</a>, which says what adit must do, and <a href="https://github.com/saulo-pro/adit/blob/main/docs/decisions.md">the decisions</a>, which say why it is built this way, or <a href="https://github.com/saulo-pro/adit">the source on GitHub</a>.</p>
 
   <footer>

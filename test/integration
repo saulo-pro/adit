@@ -8,8 +8,14 @@ cd "$(dirname "$0")/.."
 
 test/servers/up
 
-binary=$(mktemp -t adit-integration)
-trap 'rm -f "$binary"; test/servers/down' EXIT
-go test -c -tags integration -o "$binary" ./internal/server
+binaries=$(mktemp -d -t adit-integration)
+trap 'rm -rf "$binaries"; test/servers/down' EXIT
+for package in server firewall bypass; do
+  go test -c -tags integration -o "$binaries/$package" "./internal/$package"
+done
 
-sudo ADIT_TEST_SERVERS="$PWD/test/servers/out" "$binary" -test.v -test.count=1 -test.run Integration
+sudo ADIT_TEST_SERVERS="$PWD/test/servers/out" "$binaries/server" -test.v -test.count=1 -test.run Integration
+# The kill switch's pf anchor and the routes beside a full tunnel, as far as a machine that must keep
+# its own network can go; test/vm runs them blocking.
+sudo "$binaries/firewall" -test.v -test.count=1 -test.run Integration
+sudo "$binaries/bypass" -test.v -test.count=1 -test.run Integration

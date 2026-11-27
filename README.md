@@ -3,8 +3,7 @@
 A client for WireGuard® tunnels on macOS that keeps several of them up at once, with a menu bar
 icon and a command line that do the same things.
 
-> **Status:** 0.1.3. Full tunnels (`AllowedIPs = 0.0.0.0/0`) come in the
-> next version: adit refuses them for now, saying so.
+> **Status:** 0.2.0: full tunnels, beside split tunnels, with a kill switch.
 
 ## What it is for
 
@@ -15,6 +14,16 @@ back after a reboot. adit covers both:
 - **Several tunnels at the same time**, each routing only its own networks. A tunnel whose networks
   or DNS domain overlap a tunnel that is up, adit's or another program's, is refused before it
   connects, with the reason.
+- **One full tunnel beside them.** A tunnel with `AllowedIPs = 0.0.0.0/0` takes everything but the
+  local network and the other tunnels, which keep their own networks and DNS domains; every
+  tunnel's server is kept outside it. IPv6 is blocked if it carries only IPv4, and it needs a `DNS`
+  line, so names are not looked up outside it.
+- **A kill switch**, on by default: while the full tunnel is coming up or has dropped, or `aditd`
+  has died with it up, nothing leaves the Mac but through adit's tunnels. `always` blocks also while
+  it is down; `off` fails open, as the WireGuard app does. `adit signin` lifts it for two minutes to
+  sign in to a hotel's network.
+- **`adit route`** says which tunnel carries an address or a name, and which DNS server looks the
+  name up.
 - **A menu bar icon and a command line** over one privileged service, `aditd`: a tunnel switched in
   one flips in the other at once. Every command answers in plain words, or in JSON with `--json`,
   for scripts and AI agents, with meaningful exit codes.
@@ -23,7 +32,7 @@ back after a reboot. adit covers both:
 - **No password for daily use.** The administrator password is asked once, at install; switching
   tunnels needs none.
 - **DNS per tunnel.** `DNS = 10.99.1.1, corp.example` sends names under `corp.example` to
-  `10.99.1.1` and leaves every other name alone.
+  `10.99.1.1` and leaves every other name alone; a full tunnel's DNS servers answer every other name.
 - **Honest status**: the last handshake and the bytes each way, not just "connected".
 - **Plain WireGuard `.conf` files** in and out, the same ones `wg-quick` and the official apps read.
 - **Other software's tunnels shown read-only**: the WireGuard app's and `wg-quick`'s, with
@@ -66,7 +75,15 @@ adit up work                   # no password
 adit status                    # every tunnel, adit's and other software's
 adit status work --json
 adit autostart work on         # bring it up at boot
+adit route git.corp.example    # which tunnel carries it, and who looks it up
 adit down work
+
+sudo adit import home.conf     # a full tunnel: AllowedIPs = 0.0.0.0/0 and a DNS line
+adit up home                   # everything goes through it, beside work
+sudo adit killswitch home always   # on-drop (default), always or off
+sudo adit lan home block       # allow (default) or block the local network
+adit signin                    # lift the kill switch for 2 minutes: hotel sign-in pages
+
 sudo adit export work --output work.conf   # a new file, readable only by you
 sudo adit remove work
 sudo adit allow caroline         # let another account switch tunnels
