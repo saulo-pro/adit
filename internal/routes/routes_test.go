@@ -56,3 +56,15 @@ func TestTunnelsReadsTheRoutingTable(t *testing.T) {
 		}
 	}
 }
+
+func TestMissingFindsARouteThatDidNotGoIn(t *testing.T) {
+	table := []Route{
+		{Prefix: netip.MustParsePrefix("10.99.1.0/24"), Interface: "utun7"},
+		{Prefix: netip.MustParsePrefix("192.168.1.0/24"), Interface: "en0"},
+	}
+	want := []netip.Prefix{netip.MustParsePrefix("10.99.1.0/24"), netip.MustParsePrefix("192.168.1.0/24")}
+	missing := Missing(table, "utun7", want)
+	if len(missing) != 1 || missing[0] != want[1] {
+		t.Errorf("missing %v, want [192.168.1.0/24]", missing)
+	}
+}

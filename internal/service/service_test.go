@@ -546,10 +546,16 @@ func TestCleanUpRemovesOnlyAditsStaleFiles(t *testing.T) {
 }
 
 // fileWith is file with other AllowedIPs, and a DNS line when dns is not empty.
+// fileWith is the test file with other AllowedIPs, its Address the second host of their first network.
 func fileWith(allowed, dns string) string {
 	text := strings.Replace(file, "AllowedIPs = 10.99.1.0/24", "AllowedIPs = "+allowed, 1)
+	first := strings.TrimSpace(strings.Split(allowed, ",")[0])
+	if network, err := netip.ParsePrefix(first); err == nil && network.Addr().Is4() {
+		address := network.Masked().Addr().Next().Next()
+		text = strings.Replace(text, "Address = 10.99.1.2/24\n", "Address = "+address.String()+"/32\n", 1)
+	}
 	if dns != "" {
-		text = strings.Replace(text, "Address = 10.99.1.2/24\n", "Address = 10.99.1.2/24\nDNS = "+dns+"\n", 1)
+		text = strings.Replace(text, "\n[Peer]", "\nDNS = "+dns+"\n\n[Peer]", 1)
 	}
 	return text
 }
@@ -679,5 +685,72 @@ func TestAPersonAskingSeesOtherTunnelsAsTheyAreNow(t *testing.T) {
 	}
 	if got := m.Others(true); len(got) != 0 {
 		t.Errorf("a person asking still sees a tunnel that is gone: %+v", got)
+	}
+}
+
+func TestFullTunnelsInSmallerPiecesWaitToo(t *testing.T) {
+	for _, allowed := range []string{"0.0.0.0/2, 64.0.0.0/2, 128.0.0.0/2, 192.0.0.0/2", "2000::/3", "10.0.0.0/7"} {
+		m, _ := newTestManager(t)
+		importText(t, m, "pieces", fileWith(allowed, ""))
+		if err := m.Up(context.Background(), "pieces"); err == nil || !strings.Contains(err.Error(), "routes everything") {
+			t.Errorf("%s: got %v", allowed, err)
+		}
+	}
+}
+
+func TestALocalRouteThatTakesTheTunnelsTrafficIsRefused(t *testing.T) {
+	m, devices := newTestManager(t)
+	m.routes = func() ([]routes.Route, error) {
+		return []routes.Route{
+			{Prefix: netip.MustParsePrefix("0.0.0.0/0"), Interface: "en0"},
+			{Prefix: netip.MustParsePrefix("10.0.0.0/8"), Interface: "en0"},
+			{Prefix: netip.MustParsePrefix("192.168.1.0/24"), Interface: "en0"},
+		}, nil
+	}
+	importText(t, m, "williamsburg", fileWith("10.99.1.0/24", ""))
+	if err := m.Up(context.Background(), "williamsburg"); err != nil {
+		t.Fatalf("a wider local route should lose to the tunnel's own: %v", err)
+	}
+	importText(t, m, "brooklyn", fileWith("192.168.1.0/24", ""))
+	err := m.Up(context.Background(), "brooklyn")
+	if !errors.Is(err, ErrConflict) || !strings.Contains(err.Error(), "the local network routes through en0") {
+		t.Errorf("got %v", err)
+	}
+	if len(*devices) != 1 {
+		t.Errorf("%d devices started, want 1", len(*devices))
+	}
+}
+
+func TestAnEndpointUnderAnotherTunnelsDomainIsRefused(t *testing.T) {
+	m, _ := newTestManager(t)
+	importText(t, m, "diner", fileWith("10.99.1.0/24", "10.99.1.1, example.com"))
+	named := strings.Replace(fileWith("10.99.2.0/24", ""), "Endpoint = 127.0.0.1:51821", "Endpoint = vpn.example.com:51821", 1)
+	importText(t, m, "cupcakes", named)
+	if err := m.Up(context.Background(), "diner"); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Up(context.Background(), "cupcakes"); !errors.Is(err, ErrConflict) || !strings.Contains(err.Error(), "the endpoint vpn.example.com is under the DNS domain example.com") {
+		t.Errorf("got %v", err)
+	}
+}
+
+func TestRecheckNotesARouteThatAppearedLater(t *testing.T) {
+	m, _ := newTestManager(t)
+	importText(t, m, "manhattan", fileWith("10.99.1.0/24", ""))
+	if err := m.Up(context.Background(), "manhattan"); err != nil {
+		t.Fatal(err)
+	}
+	m.routes = func() ([]routes.Route, error) {
+		return []routes.Route{{Prefix: netip.MustParsePrefix("10.99.1.128/25"), Interface: "utun12"}}, nil
+	}
+	m.Recheck()
+	status, _ := m.Status("manhattan")
+	if len(status.Notes) == 0 || !strings.Contains(strings.Join(status.Notes, " "), "now routes 10.99.1.128/25") {
+		t.Errorf("notes %q", status.Notes)
+	}
+	m.routes = func() ([]routes.Route, error) { return nil, nil }
+	m.Recheck()
+	if status, _ := m.Status("manhattan"); len(status.Notes) != 0 {
+		t.Errorf("the note stayed: %q", status.Notes)
 	}
 }

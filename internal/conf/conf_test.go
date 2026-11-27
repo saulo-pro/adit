@@ -217,7 +217,14 @@ func TestParseErrors(t *testing.T) {
 		{"peer without public key", head + "[Peer]\nAllowedIPs = 10.99.1.0/24\n", 3, "this [Peer] has no PublicKey"},
 		{"same peer twice", head + peer + peer, 5, "this [Peer] has the same PublicKey as the one on line 3"},
 		{"not text", "[Interface]\n\xff\n", 0, "the file is not text"},
-		{"too large", strings.Repeat("#", maxSize+1), 0, "larger than 1 MiB"},
+		{"too large", strings.Repeat("#", maxSize+1), 0, "larger than 64 KiB"},
+		{"four dns servers", head + "DNS = 10.99.1.1, 10.99.1.2, 10.99.1.3, 10.99.1.4\n", 1, "4 DNS servers"},
+		{"top-level domain", head + "DNS = 10.99.1.1, com\n", 3, "a whole top-level domain"},
+		{"mdns domain", head + "DNS = 10.99.1.1, printer.local\n", 3, "mDNS"},
+		{"link-local address", head + "Address = fe80::2/64\n", 1, "link-local"},
+		{"reserved listen port", head + "ListenPort = 500\n", 1, "ListenPort 500 belongs to other software"},
+		{"link-local allowed ips", head + peer + "AllowedIPs = 169.254.169.254/32\n", 3, "takes 169.254.0.0/16"},
+		{"multicast allowed ips", head + peer + "AllowedIPs = ff02::/16\n", 3, "takes ff00::/8"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

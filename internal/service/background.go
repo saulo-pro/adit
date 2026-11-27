@@ -97,11 +97,13 @@ func (m *Manager) keepTrying(ctx context.Context, t *store.Tunnel) {
 // new network and looks its endpoint names up again.
 func (m *Manager) NetworkChanged(ctx context.Context) {
 	m.each(ctx, func(name string, f follower) error { return f.NetworkChanged(ctx) })
+	m.Recheck()
 }
 
 // ReresolveStale looks endpoint names up again for tunnels with no recent handshake: the server's
 // address may have changed under its name, as with dynamic DNS.
 func (m *Manager) ReresolveStale(ctx context.Context) {
+	m.Recheck()
 	m.mu.Lock()
 	stale := map[string]bool{}
 	for name, r := range m.running {

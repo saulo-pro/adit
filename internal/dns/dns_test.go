@@ -99,3 +99,31 @@ func TestClearAllRemovesEveryMarkedFile(t *testing.T) {
 func resolvers(t *testing.T) *Resolvers {
 	return &Resolvers{Dir: filepath.Join(t.TempDir(), "resolver")}
 }
+
+func TestCheckRefusesADomainThatOverlapsAnotherResolver(t *testing.T) {
+	r := &Resolvers{Dir: t.TempDir()}
+	os.WriteFile(filepath.Join(r.Dir, "example.com"), []byte("nameserver 192.0.2.53\n"), 0o644)
+	if err := r.Check("diner", []string{"corp.example.com"}); !errors.Is(err, ErrNotOurs) {
+		t.Errorf("a sub-domain of another program's domain: %v", err)
+	}
+	if err := r.Set("cupcakes", []netip.Addr{netip.MustParseAddr("10.99.1.1")}, []string{"shop.example.org"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Check("diner", []string{"example.org"}); !errors.Is(err, ErrNotOurs) {
+		t.Errorf("a parent of another tunnel's domain: %v", err)
+	}
+	if err := r.Check("diner", []string{"example.net", "notexample.com"}); err != nil {
+		t.Errorf("unrelated domains: %v", err)
+	}
+}
+
+func TestOverlapOnLabelBoundaries(t *testing.T) {
+	for _, c := range []struct {
+		a, b string
+		want bool
+	}{{"corp.example", "corp.example.", true}, {"a.corp.example", "CORP.example", true}, {"notcorp.example", "corp.example", false}, {"com", "example.com", true}, {"example", "example.com", false}} {
+		if got := Overlap(c.a, c.b); got != c.want {
+			t.Errorf("Overlap(%q, %q) = %v", c.a, c.b, got)
+		}
+	}
+}

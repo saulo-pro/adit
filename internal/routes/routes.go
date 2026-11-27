@@ -26,6 +26,25 @@ func TunnelInterface(name string) bool {
 	return false
 }
 
+// Missing lists the networks of want that the kernel does not route through iface exactly, given
+// its routing table: a route can fail to go in (another interface already holds the same network)
+// while /sbin/route still exits 0.
+func Missing(table []Route, iface string, want []netip.Prefix) []netip.Prefix {
+	have := map[netip.Prefix]bool{}
+	for _, r := range table {
+		if r.Interface == iface {
+			have[r.Prefix] = true
+		}
+	}
+	var missing []netip.Prefix
+	for _, p := range want {
+		if !have[p.Masked()] {
+			missing = append(missing, p)
+		}
+	}
+	return missing
+}
+
 // ignored are routes every utun carries that say nothing about which networks a tunnel serves:
 // link-local, multicast, loopback and broadcast.
 func ignored(p netip.Prefix) bool {

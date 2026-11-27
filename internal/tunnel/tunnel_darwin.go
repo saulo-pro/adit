@@ -3,6 +3,7 @@ package tunnel
 import (
 	"context"
 	"fmt"
+	adroutes "github.com/saulo-pro/adit/internal/routes"
 	"log/slog"
 	"net"
 	"net/netip"
@@ -52,6 +53,9 @@ func Start(ctx context.Context, c *conf.Config, log *slog.Logger) (*Tunnel, erro
 	}
 
 	t := &Tunnel{iface: iface, device: device.NewDevice(tunDevice, conn.NewDefaultBind(), deviceLogger(log, iface)), config: c}
+	// A peer's endpoint stays where the configuration (or adit's own lookup of its name) puts it:
+	// one authenticated packet from elsewhere must not move it.
+	t.device.DisableSomeRoamingForBrokenMobileSemantics()
 	if err := t.device.IpcSet(deviceConfig(c, endpoints)); err != nil {
 		t.Close()
 		return nil, fmt.Errorf("WireGuard refused the configuration: %w", err)
@@ -138,6 +142,16 @@ func configure(iface string, mtu int, c *conf.Config) error {
 		if output, err := exec.Command(args[0], args[1:]...).CombinedOutput(); err != nil {
 			return fmt.Errorf("%s failed: %s", strings.Join(args, " "), strings.TrimSpace(string(output)))
 		}
+	}
+	// /sbin/route exits 0 even when the kernel refuses a route, as when the local network already
+	// routes the same network: read the table back, so traffic never goes out in the clear while
+	// the tunnel looks up.
+	table, err := adroutes.All()
+	if err != nil {
+		return fmt.Errorf("adit could not read the routing table back: %w", err)
+	}
+	if missing := adroutes.Missing(table, iface, routes(c)); len(missing) > 0 {
+		return fmt.Errorf("the route to %s did not go in, probably because another interface already routes it; that traffic would not use the tunnel", missing[0])
 	}
 	return nil
 }

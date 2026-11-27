@@ -6,3 +6,8 @@ package routes
 func Tunnels() ([]Route, error) {
 	return nil, nil
 }
+
+// All reports no routes yet away from macOS.
+func All() ([]Route, error) {
+	return nil, nil
+}

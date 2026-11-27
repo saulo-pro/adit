@@ -14,8 +14,29 @@ import (
 )
 
 // maxSize bounds what aditd, running as root, will read: real configurations are a few hundred
-// bytes.
-const maxSize = 1 << 20
+// bytes. The other limits keep what one file can make aditd do (resolver files, routes, overlap
+// checks) small.
+const (
+	maxSize       = 64 << 10
+	maxDNSServers = 3 // macOS asks no more than three
+	maxDNSDomains = 32
+	maxPeers      = 64
+	maxAllowedIPs = 1024
+	maxAddresses  = 16
+)
+
+// special are address ranges a tunnel must not take: link-local, multicast and broadcast belong to
+// the local network, the rest is never routed anywhere.
+var special = []netip.Prefix{
+	netip.MustParsePrefix("0.0.0.0/8"), netip.MustParsePrefix("127.0.0.0/8"), netip.MustParsePrefix("169.254.0.0/16"),
+	netip.MustParsePrefix("224.0.0.0/4"), netip.MustParsePrefix("240.0.0.0/4"),
+	netip.MustParsePrefix("::/128"), netip.MustParsePrefix("::1/128"), netip.MustParsePrefix("::ffff:0:0/96"),
+	netip.MustParsePrefix("fe80::/10"), netip.MustParsePrefix("ff00::/8"),
+}
+
+// reservedPorts are ports other software on a Mac needs for itself: IKE and IPsec NAT traversal,
+// L2TP, NTP and mDNS.
+var reservedPorts = []uint16{500, 4500, 1701, 123, 5353}
 
 // An Error is a problem in a configuration file, said in one sentence a person can act on. It never
 // quotes a key.
@@ -68,7 +89,7 @@ func canonicalNames(names ...string) map[string]string {
 // Parse reads a configuration file. It returns the first problem as an *Error.
 func Parse(data []byte) (*Config, error) {
 	if len(data) > maxSize {
-		return nil, &Error{Msg: "the file is larger than 1 MiB, far beyond any WireGuard configuration"}
+		return nil, &Error{Msg: "the file is larger than 64 KiB, far beyond any WireGuard configuration"}
 	}
 	if !utf8.Valid(data) {
 		return nil, &Error{Msg: "the file is not text: it is not valid UTF-8"}
@@ -254,9 +275,20 @@ func (p *parser) dns(n int, value string) error {
 	i := &p.config.Interface
 	for _, entry := range entries {
 		if addr, err := netip.ParseAddr(entry); err == nil && addr.Zone() == "" {
-			i.DNS = append(i.DNS, addr)
+			if !slices.Contains(i.DNS, addr) {
+				i.DNS = append(i.DNS, addr)
+			}
 		} else if validHostname(entry) {
-			i.DNSSearch = append(i.DNSSearch, entry)
+			folded := strings.TrimSuffix(strings.ToLower(entry), ".")
+			switch {
+			case !strings.Contains(folded, "."):
+				return lineError(n, "the DNS domain %s is a whole top-level domain; a tunnel may resolve names under a domain of its own, such as corp.example", shown(entry))
+			case folded == "local" || strings.HasSuffix(folded, ".local"):
+				return lineError(n, "the DNS domain %s is for the local network's own names (mDNS); a tunnel cannot resolve it", shown(entry))
+			}
+			if !slices.ContainsFunc(i.DNSSearch, func(d string) bool { return strings.TrimSuffix(strings.ToLower(d), ".") == folded }) {
+				i.DNSSearch = append(i.DNSSearch, entry)
+			}
 		} else {
 			return lineError(n, "DNS entry %s is neither an IP address nor a domain name", shown(entry))
 		}
@@ -306,6 +338,43 @@ func (p *parser) peerSetting(n int, key, value string) error {
 func (p *parser) finish() error {
 	if p.interfaceLine == 0 {
 		return &Error{Msg: "the file has no [Interface] section"}
+	}
+	i := &p.config.Interface
+	switch {
+	case len(i.DNS) > maxDNSServers:
+		return lineError(p.interfaceLine, "[Interface] lists %d DNS servers; macOS asks at most %d, so list no more", len(i.DNS), maxDNSServers)
+	case len(i.DNSSearch) > maxDNSDomains:
+		return lineError(p.interfaceLine, "[Interface] lists %d DNS domains; adit takes at most %d", len(i.DNSSearch), maxDNSDomains)
+	case len(i.Addresses) > maxAddresses:
+		return lineError(p.interfaceLine, "[Interface] lists %d addresses; adit takes at most %d", len(i.Addresses), maxAddresses)
+	case len(p.config.Peers) > maxPeers:
+		return &Error{Msg: fmt.Sprintf("the file has %d peers; adit takes at most %d", len(p.config.Peers), maxPeers)}
+	}
+	if slices.Contains(reservedPorts, i.ListenPort) || i.ListenPort > 0 && i.ListenPort < 1024 {
+		return lineError(p.interfaceLine, "ListenPort %d belongs to other software or needs a privileged port; leave ListenPort out, and WireGuard picks a free one", i.ListenPort)
+	}
+	for _, address := range i.Addresses {
+		if a := address.Addr(); a.IsLinkLocalUnicast() || a.IsMulticast() || a.IsLoopback() || a.IsUnspecified() {
+			return lineError(p.interfaceLine, "the Address %s is link-local, multicast or loopback, which belong to the Mac itself; give the tunnel an address of its own", a)
+		}
+	}
+	allowed := 0
+	for n, peer := range p.config.Peers {
+		allowed += len(peer.AllowedIPs)
+		for _, network := range peer.AllowedIPs {
+			network = network.Masked()
+			if network.Addr().Is4() && network.Bits() < 8 || network.Addr().Is6() && network.Bits() < 16 {
+				continue // a full tunnel, or most of one: refused when it comes up, with its own reason
+			}
+			for _, s := range special {
+				if network.Overlaps(s) {
+					return lineError(p.peerLines[n], "AllowedIPs %s takes %s, which belongs to the local network or is never routed; leave it out", network, s)
+				}
+			}
+		}
+	}
+	if allowed > maxAllowedIPs {
+		return &Error{Msg: fmt.Sprintf("the file has %d AllowedIPs entries; adit takes at most %d", allowed, maxAllowedIPs)}
 	}
 	if p.config.Interface.PrivateKey.IsZero() {
 		return lineError(p.interfaceLine, "[Interface] has no PrivateKey")

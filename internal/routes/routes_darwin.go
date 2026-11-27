@@ -15,6 +15,17 @@ import (
 // interface. macOS gives every utun a scoped default route, which is not a full tunnel: the
 // WireGuard app's tunnel has one while public traffic still leaves through Wi-Fi.
 func Tunnels() ([]Route, error) {
+	return read(TunnelInterface)
+}
+
+// All is like Tunnels for every interface: the local network's routes too, which adit compares with
+// a tunnel's AllowedIPs (a more specific route there would take the tunnel's traffic) and reads
+// back after adding a tunnel's own routes.
+func All() ([]Route, error) {
+	return read(func(string) bool { return true })
+}
+
+func read(keep func(iface string) bool) ([]Route, error) {
 	rib, err := route.FetchRIB(syscall.AF_UNSPEC, route.RIBTypeRoute, 0)
 	if err != nil {
 		return nil, err
@@ -38,7 +49,7 @@ func Tunnels() ([]Route, error) {
 			}
 			names[m.Index] = name
 		}
-		if !TunnelInterface(name) {
+		if name == "" || !keep(name) {
 			continue
 		}
 		prefix, ok := destination(m)

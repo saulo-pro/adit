@@ -28,6 +28,19 @@ notes of its GitHub release.
 - `sudo adit install` refuses a group named adit it did not create unless `--reuse-group`, gives
   the group it creates an unused id below 500, and `uninstall` deletes only a group adit created.
 - `adit version` says when `aditd` is older than `adit`.
+- Bringing a tunnel up reads the routing table back: if a route did not go in (another
+  interface already holds that network), the tunnel fails instead of sending that traffic in the
+  clear. A local-network route as specific as an AllowedIPs network, a DNS domain above or below
+  another resolver's, a tunnel address inside another tunnel's networks, and an endpoint name
+  under another tunnel's DNS domain are refused. While a tunnel is up, adit notes routes that
+  other software adds later inside its networks.
+- The full-tunnel refusal judges what AllowedIPs cover together: four /2 networks, 2000::/3 or
+  any network wider than /8 (IPv6: /16) count too.
+- A file may list at most 3 DNS servers, 32 DNS domains, 16 addresses, 64 peers and 1,024
+  AllowedIPs, in at most 64 KiB; repeated entries count once. Whole top-level domains, `.local`,
+  link-local, multicast and unroutable AllowedIPs, link-local addresses and reserved ListenPorts
+  are refused. Table, SaveConfig and FwMark lines draw a warning: adit ignores them.
+- A peer's endpoint no longer moves to wherever one of its packets came from.
 
 ### Changed
 

@@ -42,9 +42,42 @@ func fileName(domain string) string {
 	return strings.ToLower(strings.TrimSuffix(domain, "."))
 }
 
+// Overlap says whether two domains share names: one is the other, or lies under it. macOS sends a
+// name to the most specific resolver file, so a tunnel claiming a sub-domain of another's domain
+// would take those names from it.
+func Overlap(a, b string) bool {
+	a, b = fileName(a), fileName(b)
+	return a == b || strings.HasSuffix(a, "."+b) || strings.HasSuffix(b, "."+a)
+}
+
+// maxServers is how many servers a resolver file lists: macOS asks no more than three.
+const maxServers = 3
+
 // Check refuses domains whose resolver file exists and does not carry tunnel's mark: someone else
-// wrote it, or another adit tunnel did.
+// wrote it, or another adit tunnel did. It also refuses a domain above or below one another
+// resolver file covers, adit's or not.
 func (r *Resolvers) Check(tunnel string, domains []string) error {
+	if entries, err := os.ReadDir(r.Dir); err == nil {
+		for _, entry := range entries {
+			name := entry.Name()
+			if strings.HasPrefix(name, ".") || !entry.Type().IsRegular() {
+				continue
+			}
+			for _, domain := range domains {
+				if fileName(domain) == name || !Overlap(domain, name) {
+					continue
+				}
+				owner, err := r.owner(filepath.Join(r.Dir, name))
+				switch {
+				case err != nil || owner == tunnel:
+				case owner == "":
+					return &notOurs{fmt.Sprintf("%s already sends names under %s to other servers, and %s overlaps it; take %s off %s's DNS line", filepath.Join(r.Dir, name), name, domain, domain, tunnel)}
+				default:
+					return &notOurs{fmt.Sprintf("the tunnel %s resolves %s, which overlaps %s", owner, name, domain)}
+				}
+			}
+		}
+	}
 	for _, domain := range domains {
 		path := filepath.Join(r.Dir, fileName(domain))
 		owner, err := r.owner(path)
@@ -78,7 +111,7 @@ func (r *Resolvers) Set(tunnel string, servers []netip.Addr, domains []string) e
 
 	var content strings.Builder
 	content.WriteString(markPrefix + tunnel + markSuffix + "\n")
-	for _, server := range servers {
+	for _, server := range servers[:min(len(servers), maxServers)] {
 		fmt.Fprintf(&content, "nameserver %s\n", server)
 	}
 	for _, domain := range domains {

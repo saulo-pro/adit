@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/netip"
 	"os/exec"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -75,7 +76,7 @@ type system struct {
 	start     starter
 	now       func() time.Time
 	resolvers *dns.Resolvers
-	routes    func() ([]routes.Route, error) // other software's tunnels
+	routes    func() ([]routes.Route, error) // the routing table: other tunnels and the local network
 	others    func() []others.Tunnel         // other software's tunnels: the WireGuard app's, wg-quick's
 	retryWait time.Duration                  // the first pause between tries of an autostart tunnel
 }
@@ -84,6 +85,7 @@ type running struct {
 	dev    device
 	config *conf.Config
 	notes  []string
+	live   []string // what changed around it since it came up, as of the last check
 }
 
 // attempt is a tunnel coming up. Down and Remove cancel it; its own pointer tells Up whether the
@@ -119,7 +121,7 @@ func New(st *store.Store, log *slog.Logger) *Manager {
 		},
 		now:       time.Now,
 		resolvers: &dns.Resolvers{Dir: dns.DefaultDir},
-		routes:    routes.Tunnels,
+		routes:    routes.All,
 		others: (&others.Finder{WireGuardDir: routes.WireGuardDir, Run: func(name string, args ...string) ([]byte, error) {
 			return exec.Command(name, args...).Output()
 		}}).All,
@@ -188,6 +190,12 @@ func (m *Manager) Import(name string, text []byte) ([]string, error) {
 	var warnings []string
 	for _, hook := range t.Config.Interface.Hooks() {
 		warnings = append(warnings, fmt.Sprintf("%s line kept but not run: adit never runs commands from a configuration.", hook))
+	}
+	if i := t.Config.Interface; i.Table != "" {
+		warnings = append(warnings, fmt.Sprintf("Table = %s line kept but ignored: adit adds a route for every AllowedIPs entry.", i.Table))
+	}
+	if i := t.Config.Interface; i.SaveConfig || i.FwMark != 0 {
+		warnings = append(warnings, "SaveConfig and FwMark lines are kept but ignored: they mean something only to wg-quick on Linux.")
 	}
 	return warnings, nil
 }
@@ -286,15 +294,44 @@ func (m *Manager) up(ctx context.Context, name string, r *retry) error {
 	return nil
 }
 
-// fullTunnel finds a route to everywhere, which needs the endpoint kept outside the tunnel across
-// network changes: milestone 2.
+// fullTunnel finds AllowedIPs that route everywhere, or a large part of it, which needs the endpoint
+// kept outside the tunnel across network changes: milestone 2. It judges what the networks cover
+// together, not one at a time: two /1 halves, four /2 networks or 2000::/3 are full tunnels too. A
+// network wider than /8 (IPv4) or /16 (IPv6), or IPv4 networks covering half the space, count.
 func fullTunnel(c *conf.Config) (netip.Prefix, bool) {
+	var covered uint64
 	for _, network := range networks(c) {
-		if routes.CatchAll(network) {
+		if network.Addr().Is4() && network.Bits() < 8 || network.Addr().Is6() && network.Bits() < 16 {
 			return network, true
 		}
 	}
+	for _, network := range merged(networks(c)) {
+		if network.Addr().Is4() {
+			covered += 1 << (32 - network.Bits())
+			if covered >= 1<<31 {
+				return network, true
+			}
+		}
+	}
 	return netip.Prefix{}, false
+}
+
+// merged drops the networks another one in the list already contains, so each address counts once.
+func merged(all []netip.Prefix) []netip.Prefix {
+	var kept []netip.Prefix
+	for i, p := range all {
+		inside := false
+		for j, q := range all {
+			if i != j && q.Bits() <= p.Bits() && q.Contains(p.Addr()) && (q.Bits() < p.Bits() || j < i) {
+				inside = true
+				break
+			}
+		}
+		if !inside {
+			kept = append(kept, p)
+		}
+	}
+	return kept
 }
 
 // check refuses a tunnel whose networks or DNS domains another tunnel already has, adit's or
@@ -308,6 +345,30 @@ func (m *Manager) check(t *store.Tunnel) ([]string, error) {
 			for _, b := range networks(config) {
 				if a.Overlaps(b) {
 					return nil, conflict("%s's AllowedIPs %s overlaps %s of %s, which is up; take %s down first, or change one of them", t.Name, a, b, name, name)
+				}
+			}
+		}
+		// A tunnel's own address inside another's networks would make the two answer for it.
+		for _, pair := range [][2]*conf.Config{{t.Config, config}, {config, t.Config}} {
+			for _, address := range pair[0].Interface.Addresses {
+				for _, b := range networks(pair[1]) {
+					if b.Contains(address.Addr()) {
+						return nil, conflict("the address %s of one of %s and %s lies in the other's AllowedIPs %s; take %s down first, or change one of them", address.Addr(), t.Name, name, b, name)
+					}
+				}
+			}
+		}
+		// A name looked up through another tunnel's DNS would let that tunnel's server choose where
+		// this one connects.
+		for _, pair := range [][2]*conf.Config{{t.Config, config}, {config, t.Config}} {
+			for _, peer := range pair[0].Peers {
+				if _, err := netip.ParseAddr(peer.Endpoint.Host); err == nil || peer.Endpoint.IsZero() {
+					continue
+				}
+				for _, d := range domains(pair[1]) {
+					if sameDomain(peer.Endpoint.Host, d) {
+						return nil, conflict("the endpoint %s is under the DNS domain %s that one of %s and %s resolves through its tunnel; take %s down first", peer.Endpoint.Host, d, t.Name, name, name)
+					}
 				}
 			}
 		}
@@ -334,6 +395,12 @@ func (m *Manager) check(t *store.Tunnel) ([]string, error) {
 		if ours[route.Interface] {
 			continue
 		}
+		if !routes.TunnelInterface(route.Interface) {
+			if a, ok := localSteals(mine, route); ok {
+				return nil, conflict("%s's AllowedIPs %s overlaps %s, which the local network routes through %s: that traffic would not use the tunnel; change AllowedIPs, or join another network", t.Name, a, route.Prefix, route.Interface)
+			}
+			continue
+		}
 		if routes.CatchAll(route.Prefix) {
 			if note := endpointNote(t, route, m.describe(route.Interface)); note != "" && !noted[route.Interface] {
 				noted[route.Interface] = true
@@ -355,6 +422,70 @@ func (m *Manager) check(t *store.Tunnel) ([]string, error) {
 		return nil, err
 	}
 	return notes, nil
+}
+
+// localSteals finds a network of mine that a route of the local network takes traffic from: one as
+// specific as it, or more. A wider local route (a default route, a /16 around a /24) loses to the
+// tunnel's own and is fine. Loopback routes are the Mac's own addresses.
+func localSteals(mine []netip.Prefix, route routes.Route) (netip.Prefix, bool) {
+	if route.Interface == "lo0" || routes.CatchAll(route.Prefix) {
+		return netip.Prefix{}, false
+	}
+	for _, a := range mine {
+		if a.Overlaps(route.Prefix) && route.Prefix.Bits() >= a.Bits() {
+			return a, true
+		}
+	}
+	return netip.Prefix{}, false
+}
+
+// Recheck looks again, for every tunnel that is up, at routes other software added since it came
+// up: another VPN, or the local network, may now take some of its traffic. What it finds shows in
+// status and the menu until it goes away. aditd calls it after network changes and every minute.
+func (m *Manager) Recheck() {
+	table, err := m.routes()
+	if err != nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	ours := map[string]bool{}
+	for _, r := range m.running {
+		ours[r.dev.Interface()] = true
+	}
+	changed := false
+	for name, r := range m.running {
+		var live []string
+		mine := networks(r.config)
+		for _, route := range table {
+			if ours[route.Interface] {
+				continue
+			}
+			if !routes.TunnelInterface(route.Interface) {
+				if a, ok := localSteals(mine, route); ok {
+					live = append(live, fmt.Sprintf("the local network now routes %s through %s, so traffic for that part of %s does not use %s", route.Prefix, route.Interface, a, name))
+				}
+				continue
+			}
+			if routes.CatchAll(route.Prefix) {
+				continue
+			}
+			for _, a := range mine {
+				if a.Overlaps(route.Prefix) && route.Prefix.Bits() >= a.Bits() {
+					live = append(live, fmt.Sprintf("%s now routes %s, inside %s, so that traffic does not use %s", m.describe(route.Interface), route.Prefix, a, name))
+				}
+			}
+		}
+		if !slices.Equal(live, r.live) {
+			r.live, changed = live, true
+			for _, note := range live {
+				m.log.Warn("another route takes part of a tunnel's traffic", "tunnel", name, "note", note)
+			}
+		}
+	}
+	if changed {
+		m.notify()
+	}
 }
 
 // siblings are the configs of adit's tunnels that are up or coming up, other than name.
@@ -406,8 +537,7 @@ func domains(c *conf.Config) []string {
 }
 
 func sameDomain(a, b string) bool {
-	trim := func(s string) string { return strings.TrimSuffix(strings.ToLower(s), ".") }
-	return trim(a) == trim(b)
+	return dns.Overlap(a, b)
 }
 
 // dnsNotes say when a DNS line does nothing: adit scopes DNS to domains.
@@ -528,6 +658,7 @@ func (m *Manager) status(t *store.Tunnel) (Status, error) {
 		return status, nil
 	}
 	status.Notes = append(status.Notes, r.notes...)
+	status.Notes = append(status.Notes, r.live...)
 
 	reported, err := r.dev.Status()
 	if err != nil {
