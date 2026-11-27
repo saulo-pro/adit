@@ -90,7 +90,7 @@ sudo adit install</code></pre>
   <p>Or with one line, without Homebrew:</p>
   <pre><code>curl -fsSL https://adit.saulo.pro/install.sh | sh</code></pre>
   <p>It downloads the latest release from GitHub, checks it against the release's <code>SHA256SUMS</code>, puts <code>adit</code>, <code>aditd</code> and <code>adit-tray</code> in <code>/usr/local/bin</code> and runs <code>sudo adit install</code>; sudo asks for your password once. <a href="install.sh">Read it</a> first if you like. Run it again to upgrade. It stops on a Mac where Homebrew installed adit, since the two copies would replace each other. To remove what it installed: <code>sudo adit uninstall</code>, then delete the three binaries from <code>/usr/local/bin</code>.</p>
-  <p><code>sudo adit install</code> copies <code>aditd</code> to <code>/Library/PrivilegedHelperTools/pro.saulo.adit</code>, where only root can change it, and starts it now and at every boot. It also sets the menu bar icon to start at every login, and creates the <code>adit</code> group with you in it. Run it again after every <code>brew upgrade adit</code>.</p>
+  <p><code>sudo adit install</code> copies <code>aditd</code> to <code>/Library/PrivilegedHelperTools/pro.saulo.adit</code>, where only root can change it, and starts it now and at every boot. It also sets the menu bar icon to start at every login, from its own root-owned copy, and creates the <code>adit</code> group with you in it. Run it again after every <code>brew upgrade adit</code>.</p>
   <h2>Use</h2>
   <pre><code>sudo adit import work.conf     # add a tunnel; hook lines are kept but never run
 adit up work                   # no password

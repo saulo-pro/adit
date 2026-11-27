@@ -19,18 +19,24 @@ func TestInstallPutsEverythingInPlaceAndStartsAditd(t *testing.T) {
 	i, sys := newInstaller(t)
 	source := filepath.Join(t.TempDir(), "aditd")
 	os.WriteFile(source, []byte("the aditd binary"), 0o700)
+	tray := filepath.Join(t.TempDir(), "adit-tray")
+	os.WriteFile(tray, []byte("the tray binary"), 0o700)
 
 	var out strings.Builder
-	if err := i.Install(Options{Aditd: source, Tray: "/opt/homebrew/bin/adit-tray", User: "max", UID: 501}, &out); err != nil {
+	if err := i.Install(Options{Aditd: source, Tray: tray, User: "max", UID: 501}, &out); err != nil {
 		t.Fatal(err)
 	}
 
 	if lint, err := exec.Command("/usr/bin/plutil", "-lint", i.path(TrayAgent)).CombinedOutput(); err != nil {
 		t.Errorf("the tray's LaunchAgent is not a valid property list: %s", lint)
 	}
-	if agent, _ := os.ReadFile(i.path(TrayAgent)); !strings.Contains(string(agent), "<string>/opt/homebrew/bin/adit-tray</string>") {
-		t.Errorf("the LaunchAgent does not start the tray: %s", agent)
+	if agent, _ := os.ReadFile(i.path(TrayAgent)); !strings.Contains(string(agent), "<string>"+TrayBinary+"</string>") {
+		t.Errorf("the LaunchAgent does not start the tray's root-owned copy: %s", agent)
 	}
+	if copied, _ := os.ReadFile(i.path(TrayBinary)); string(copied) != "the tray binary" {
+		t.Errorf("the tray's copy holds %q", copied)
+	}
+	assertMode(t, i.path(TrayBinary), 0o755)
 	if binary, _ := os.ReadFile(i.path(Binary)); string(binary) != "the aditd binary" {
 		t.Errorf("installed binary holds %q", binary)
 	}
@@ -50,7 +56,7 @@ func TestInstallPutsEverythingInPlaceAndStartsAditd(t *testing.T) {
 	}
 
 	sys.expect(t,
-		"/usr/sbin/dseditgroup -o create -r adit users: may switch tunnels without a password adit",
+		"/usr/sbin/dseditgroup -o create -r adit users: may switch tunnels without a password -i 498 adit",
 		"/usr/sbin/dseditgroup -o edit -a max -t user adit",
 		"/bin/launchctl bootstrap system "+i.path(Plist),
 		"/bin/launchctl bootstrap gui/501 "+i.path(TrayAgent),
@@ -62,7 +68,7 @@ func TestInstallPutsEverythingInPlaceAndStartsAditd(t *testing.T) {
 
 func TestInstallAgainStopsTheOldAditdFirst(t *testing.T) {
 	i, sys := newInstaller(t)
-	sys.group, sys.loaded = true, true
+	sys.group, sys.adits, sys.loaded = true, true, true
 	source := filepath.Join(t.TempDir(), "aditd")
 	os.WriteFile(source, []byte("v2"), 0o700)
 
@@ -87,7 +93,9 @@ func TestUninstallRemovesEverything(t *testing.T) {
 	i, sys := newInstaller(t)
 	source := filepath.Join(t.TempDir(), "aditd")
 	os.WriteFile(source, []byte("aditd"), 0o700)
-	if err := i.Install(Options{Aditd: source, Tray: "/opt/homebrew/bin/adit-tray", User: "max", UID: 501}, &strings.Builder{}); err != nil {
+	tray := filepath.Join(t.TempDir(), "adit-tray")
+	os.WriteFile(tray, []byte("tray"), 0o700)
+	if err := i.Install(Options{Aditd: source, Tray: tray, User: "max", UID: 501}, &strings.Builder{}); err != nil {
 		t.Fatal(err)
 	}
 	os.MkdirAll(i.path(StoreDir), 0o700)
@@ -104,7 +112,7 @@ func TestUninstallRemovesEverything(t *testing.T) {
 	if err := i.Uninstall(false, 501, &out); err != nil {
 		t.Fatal(err)
 	}
-	for _, path := range []string{Plist, TrayAgent, Binary, Newsyslog, Log, Log + ".0.bz2", Store, dns.DefaultDir + "/corp.example"} {
+	for _, path := range []string{Plist, TrayAgent, Binary, TrayBinary, Newsyslog, Log, Log + ".0.bz2", Store, dns.DefaultDir + "/corp.example"} {
 		if _, err := os.Stat(i.path(path)); err == nil {
 			t.Errorf("%s is still there", path)
 		}
@@ -119,6 +127,40 @@ func TestUninstallRemovesEverything(t *testing.T) {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("the report lacks %q:\n%s", want, out.String())
 		}
+	}
+}
+
+func TestInstallRefusesAGroupAditDidNotCreate(t *testing.T) {
+	i, sys := newInstaller(t)
+	sys.group = true // made by someone else, with a member
+	source := filepath.Join(t.TempDir(), "aditd")
+	os.WriteFile(source, []byte("aditd"), 0o700)
+
+	err := i.Install(Options{Aditd: source}, &strings.Builder{})
+	if err == nil || !strings.Contains(err.Error(), "--reuse-group") || !strings.Contains(err.Error(), "earl") {
+		t.Fatalf("got %v", err)
+	}
+	if _, err := os.Stat(i.path(Binary)); err == nil {
+		t.Error("aditd was installed anyway")
+	}
+
+	var out strings.Builder
+	if err := i.Install(Options{Aditd: source, ReuseGroup: true}, &out); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "Using the existing adit group; its members can switch tunnels: earl") {
+		t.Errorf("reported:\n%s", out.String())
+	}
+
+	out.Reset()
+	if err := i.Uninstall(false, 0, &out); err != nil {
+		t.Fatal(err)
+	}
+	if slices.Contains(sys.ran, "/usr/sbin/dseditgroup -o delete adit") {
+		t.Error("uninstall deleted a group adit did not create")
+	}
+	if !strings.Contains(out.String(), "Kept the adit group") {
+		t.Errorf("reported:\n%s", out.String())
 	}
 }
 
@@ -144,6 +186,7 @@ func TestAllowNeedsTheGroup(t *testing.T) {
 // fakeSystem stands in for launchctl, dscl and dseditgroup.
 type fakeSystem struct {
 	group  bool // the adit group exists
+	adits  bool // and adit created it
 	loaded bool // aditd is in launchd
 	ran    []string
 }
@@ -151,13 +194,23 @@ type fakeSystem struct {
 func (s *fakeSystem) run(name string, args ...string) ([]byte, error) {
 	command := strings.Join(append([]string{name}, args...), " ")
 	switch {
+	case command == "/usr/bin/dscl /Search -list /Groups PrimaryGroupID":
+		return []byte("staff                    20\nwheel                    0\nsomething                499\n"), nil
 	case name == "/usr/bin/dscl":
 		if !s.group {
 			return []byte("eDSRecordNotFound"), errors.New("exit status 56")
 		}
+		switch {
+		case strings.HasSuffix(command, "RealName") && s.adits:
+			return []byte("RealName:\n " + groupRealName + "\n"), nil
+		case strings.HasSuffix(command, "RealName"):
+			return []byte("RealName: Earl's group\n"), nil
+		case strings.Contains(command, "GroupMembership") && !s.adits:
+			return []byte("GroupMembership: earl\n"), nil
+		}
 		return nil, nil
 	case strings.Contains(command, "dseditgroup -o create"):
-		s.group = true
+		s.group, s.adits = true, true
 	case strings.Contains(command, "dseditgroup -o delete"):
 		s.group = false
 	case strings.Contains(command, "launchctl bootout system/"):

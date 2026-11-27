@@ -27,27 +27,35 @@ const (
 	Label = "pro.saulo.adit"
 	Group = "adit"
 
-	Binary    = "/Library/PrivilegedHelperTools/" + Label
-	Plist     = "/Library/LaunchDaemons/" + Label + ".plist"
-	Newsyslog = "/etc/newsyslog.d/" + Label + ".conf"
-	Log       = "/var/log/aditd.log"
-	PidFile   = "/var/run/aditd.pid"
-	Store     = "/var/db/adit"
-	StoreDir  = Store + "/tunnels"
-	RunDir    = "/var/run/adit"
+	Binary = "/Library/PrivilegedHelperTools/" + Label
+	// TrayBinary is the menu bar icon's own root-owned copy: the LaunchAgent starts it in every
+	// account's session, so it must not be a file one account can change.
+	TrayBinary = "/Library/PrivilegedHelperTools/" + Label + ".tray"
+	Plist      = "/Library/LaunchDaemons/" + Label + ".plist"
+	Newsyslog  = "/etc/newsyslog.d/" + Label + ".conf"
+	Log        = "/var/log/aditd.log"
+	PidFile    = "/var/run/aditd.pid"
+	Store      = "/var/db/adit"
+	StoreDir   = Store + "/tunnels"
+	RunDir     = "/var/run/adit"
 
 	TrayLabel = Label + ".tray"
 	TrayAgent = "/Library/LaunchAgents/" + TrayLabel + ".plist"
 )
 
 // Options say what to install: aditd from Aditd, the menu bar icon from Tray if not empty, and User
-// (UID) into the adit group with the icon started in their session now.
+// (UID) into the adit group with the icon started in their session now. ReuseGroup accepts a group
+// named adit that adit did not create.
 type Options struct {
-	Aditd string
-	Tray  string
-	User  string
-	UID   int
+	Aditd      string
+	Tray       string
+	User       string
+	UID        int
+	ReuseGroup bool
 }
+
+// groupRealName marks the adit group as adit's own: uninstall deletes only a group carrying it.
+const groupRealName = "adit users: may switch tunnels without a password"
 
 type Installer struct {
 	Root  string                                            // prefixed to every path; tests use a scratch directory
@@ -75,10 +83,22 @@ func (i *Installer) path(p string) string {
 // not empty, it joins the adit group. It reports what it did, one line each, to out.
 func (i *Installer) Install(o Options, out io.Writer) error {
 	if !i.groupExists() {
-		if output, err := i.Run("/usr/sbin/dseditgroup", "-o", "create", "-r", "adit users: may switch tunnels without a password", Group); err != nil {
+		args := []string{"-o", "create", "-r", groupRealName}
+		if gid := i.freeGid(); gid != "" {
+			args = append(args, "-i", gid)
+		}
+		if output, err := i.Run("/usr/sbin/dseditgroup", append(args, Group)...); err != nil {
 			return fmt.Errorf("could not create the adit group: %s", clean(output))
 		}
 		fmt.Fprintln(out, "Created the adit group.")
+	} else if !i.groupIsAdits() {
+		// Its members would be able to switch every tunnel: say who they are, and go on only when
+		// asked to.
+		members := i.groupMembers()
+		if !o.ReuseGroup {
+			return fmt.Errorf("a group named adit already exists and adit did not create it (members: %s); remove it, or run install again with --reuse-group to let its members switch tunnels", members)
+		}
+		fmt.Fprintf(out, "Using the existing adit group; its members can switch tunnels: %s.\n", members)
 	}
 	if o.User != "" {
 		if err := i.Allow(o.User); err != nil {
@@ -93,6 +113,12 @@ func (i *Installer) Install(o Options, out io.Writer) error {
 	binary, err := os.ReadFile(o.Aditd)
 	if err != nil {
 		return fmt.Errorf("could not read aditd at %s: %w", o.Aditd, errors.Unwrap(err))
+	}
+	var tray []byte
+	if o.Tray != "" {
+		if tray, err = os.ReadFile(o.Tray); err != nil {
+			return fmt.Errorf("could not read adit-tray at %s: %w", o.Tray, errors.Unwrap(err))
+		}
 	}
 	for _, file := range []struct {
 		path    string
@@ -122,7 +148,10 @@ func (i *Installer) Install(o Options, out io.Writer) error {
 	if o.Tray == "" {
 		return nil
 	}
-	if err := i.writeRoot(TrayAgent, []byte(trayAgent(o.Tray)), 0o644); err != nil {
+	if err := i.writeRoot(TrayBinary, tray, 0o755); err != nil {
+		return err
+	}
+	if err := i.writeRoot(TrayAgent, []byte(trayAgent()), 0o644); err != nil {
 		return err
 	}
 	fmt.Fprintf(out, "The menu bar icon starts at every login (%s).\n", TrayAgent)
@@ -159,6 +188,7 @@ func (i *Installer) Uninstall(keepTunnels bool, uid int, out io.Writer) error {
 	remove(Plist, "the LaunchDaemon")
 	remove(TrayAgent, "the menu bar icon's LaunchAgent")
 	remove(Binary, "aditd")
+	remove(TrayBinary, "the menu bar icon")
 	remove(Newsyslog, "log rotation")
 	logs, _ := filepath.Glob(i.path(Log) + "*")
 	for _, log := range logs {
@@ -173,7 +203,11 @@ func (i *Installer) Uninstall(keepTunnels bool, uid int, out io.Writer) error {
 	} else {
 		remove(Store, "every tunnel and its keys")
 	}
-	if i.groupExists() {
+	switch {
+	case !i.groupExists():
+	case !i.groupIsAdits():
+		fmt.Fprintln(out, "Kept the adit group: adit did not create it.")
+	default:
 		if output, err := i.Run("/usr/sbin/dseditgroup", "-o", "delete", Group); err != nil {
 			errs = append(errs, fmt.Errorf("could not delete the adit group: %s", clean(output)))
 		} else {
@@ -213,6 +247,43 @@ func (i *Installer) Installed() bool {
 func (i *Installer) groupExists() bool {
 	_, err := i.Run("/usr/bin/dscl", ".", "-read", "/Groups/"+Group, "PrimaryGroupID")
 	return err == nil
+}
+
+// groupIsAdits says whether the adit group is the one adit created, by the name it gave it.
+func (i *Installer) groupIsAdits() bool {
+	output, err := i.Run("/usr/bin/dscl", ".", "-read", "/Groups/"+Group, "RealName")
+	return err == nil && strings.Contains(string(output), groupRealName)
+}
+
+// groupMembers lists who the adit group admits, directly and through nested groups.
+func (i *Installer) groupMembers() string {
+	output, err := i.Run("/usr/bin/dscl", ".", "-read", "/Groups/"+Group, "GroupMembership", "NestedGroups")
+	members := strings.Join(strings.Fields(strings.NewReplacer("GroupMembership:", "", "NestedGroups:", "nested groups").Replace(string(output))), " ")
+	if err != nil || members == "" {
+		return "none"
+	}
+	return members
+}
+
+// freeGid picks a group id below 500, where macOS keeps groups out of sight, that no group uses in
+// any directory the Mac searches: a gid shared with another group would let its members in.
+func (i *Installer) freeGid() string {
+	output, err := i.Run("/usr/bin/dscl", "/Search", "-list", "/Groups", "PrimaryGroupID")
+	if err != nil {
+		return ""
+	}
+	used := map[string]bool{}
+	for line := range strings.Lines(string(output)) {
+		if fields := strings.Fields(line); len(fields) == 2 {
+			used[fields[1]] = true
+		}
+	}
+	for gid := 499; gid >= 400; gid-- {
+		if id := fmt.Sprint(gid); !used[id] {
+			return id
+		}
+	}
+	return ""
 }
 
 // stop takes aditd out of launchd, which stops it, and waits until it has let go of its socket:
@@ -287,7 +358,7 @@ func plist() string {
 
 // trayAgent starts the menu bar icon at every login, and again if it crashes, but not after the
 // person quits it.
-func trayAgent(tray string) string {
+func trayAgent() string {
 	return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -296,7 +367,7 @@ func trayAgent(tray string) string {
   <string>` + TrayLabel + `</string>
   <key>ProgramArguments</key>
   <array>
-    <string>` + tray + `</string>
+    <string>` + TrayBinary + `</string>
   </array>
   <key>RunAtLoad</key>
   <true/>

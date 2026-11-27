@@ -63,7 +63,7 @@ type CLI struct {
 	// upWait is how long up waits for a first handshake before answering.
 	upWait time.Duration
 	// chown hands an exported file to the person who ran sudo; euid says whether adit runs as root.
-	chown func(path string, uid, gid int) error
+	chown func(file *os.File, uid, gid int) error
 	euid  func() int
 
 	// The system around adit, for install and friends; fakes in tests.
@@ -73,7 +73,12 @@ type CLI struct {
 	lookupUser func(name string) error
 	isTerminal func() bool
 	exists     func(path string) bool
-	aditdWait  time.Duration
+	// stage copies aditd and the tray (if any) into a folder only root can change, for checking
+	// and installing; writableByOthers names a file or folder on a path that an account other than
+	// root may change, or "".
+	stage            func(aditd, tray string) ([2]string, func(), error)
+	writableByOthers func(path string) string
+	aditdWait        time.Duration
 }
 
 type command func(c *CLI, ctx context.Context, out *output, args []string) error
@@ -197,10 +202,15 @@ func newFlags(name string) *flag.FlagSet {
 	return flag.NewFlagSet(name, flag.ContinueOnError)
 }
 
-// New is the command line as people run it. ADIT_SOCKET points it at another aditd, for testing.
+// New is the command line as people run it. ADIT_SOCKET points it at another aditd, for testing;
+// under sudo it is ignored, so a variable in the environment cannot send a key elsewhere.
 func New(version string, stdin io.Reader, stdout, stderr io.Writer) *CLI {
+	socket := os.Getenv("ADIT_SOCKET")
+	if os.Geteuid() == 0 {
+		socket = ""
+	}
 	return &CLI{
-		Client:  &api.Client{Socket: os.Getenv("ADIT_SOCKET")},
+		Client:  &api.Client{Socket: socket},
 		Version: version,
 		Stdin:   stdin,
 		Stdout:  stdout,
@@ -208,7 +218,7 @@ func New(version string, stdin io.Reader, stdout, stderr io.Writer) *CLI {
 		Getenv:  os.Getenv,
 		Now:     time.Now,
 		upWait:  3 * time.Second,
-		chown:   os.Chown,
+		chown:   (*os.File).Chown,
 		euid:    os.Geteuid,
 
 		installer:  install.New(),
@@ -230,5 +240,7 @@ func New(version string, stdin io.Reader, stdout, stderr io.Writer) *CLI {
 			_, err := os.Stat(path)
 			return err == nil
 		},
+		stage:            stageCopies,
+		writableByOthers: writableByOthers,
 	}
 }

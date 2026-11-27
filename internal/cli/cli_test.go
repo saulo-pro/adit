@@ -234,7 +234,10 @@ func TestExportUnderSudoHandsTheFileToTheUser(t *testing.T) {
 	var owner []int
 	run.c.euid = func() int { return 0 }
 	run.c.Getenv = func(key string) string { return map[string]string{"SUDO_UID": "501", "SUDO_GID": "20"}[key] }
-	run.c.chown = func(path string, uid, gid int) error {
+	run.c.chown = func(file *os.File, uid, gid int) error {
+		if info, _ := file.Stat(); info.Size() != 0 {
+			t.Error("the key was written before the file was handed over")
+		}
 		owner = []int{uid, gid}
 		return nil
 	}
@@ -243,6 +246,32 @@ func TestExportUnderSudoHandsTheFileToTheUser(t *testing.T) {
 	}
 	if len(owner) != 2 || owner[0] != 501 || owner[1] != 20 {
 		t.Errorf("chown to %v, want 501:20", owner)
+	}
+}
+
+func TestExportNeverFollowsALink(t *testing.T) {
+	run := newRun(t, func(api.Request) api.Response { return api.Response{OK: true, File: exportedFile} })
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target")
+	os.Symlink(target, filepath.Join(dir, "work.conf"))
+	if code := run.cli("export", "work", "--output", filepath.Join(dir, "work.conf")); code == 0 {
+		t.Fatal("export wrote through a symbolic link")
+	}
+	if _, err := os.Lstat(target); err == nil {
+		t.Error("the link's target was created")
+	}
+}
+
+func TestImportReadsOnlyARegularFileNotThroughALink(t *testing.T) {
+	run := newRun(t, func(api.Request) api.Response { return api.Response{OK: true} })
+	dir := t.TempDir()
+	real := filepath.Join(dir, "real.conf")
+	os.WriteFile(real, []byte("[Interface]\n"), 0o600)
+	os.Symlink(real, filepath.Join(dir, "link.conf"))
+	for _, path := range []string{filepath.Join(dir, "link.conf"), dir, "/dev/zero"} {
+		if code := run.cli("import", path, "--name", "diner"); code == 0 {
+			t.Errorf("import of %s succeeded", path)
+		}
 	}
 }
 
@@ -310,7 +339,7 @@ func newRun(t *testing.T, handle func(api.Request) api.Response) *run {
 		Getenv:  func(string) string { return "" },
 		Now:     func() time.Time { return now },
 		upWait:  3 * time.Second,
-		chown:   func(string, int, int) error { return nil },
+		chown:   func(*os.File, int, int) error { return nil },
 		euid:    func() int { return 501 },
 	}
 	go func() {
@@ -422,6 +451,13 @@ func withSystem(run *run, root bool) *fakeInstaller {
 	}
 	run.c.isTerminal = func() bool { return false }
 	run.c.exists = func(path string) bool { return path == "/opt/homebrew/Cellar/adit/1.0/bin/adit-tray" }
+	run.c.stage = func(aditd, tray string) ([2]string, func(), error) { return [2]string{aditd, tray}, func() {}, nil }
+	run.c.writableByOthers = func(path string) string {
+		if strings.HasPrefix(path, "/opt/homebrew/") {
+			return "/opt/homebrew"
+		}
+		return ""
+	}
 	run.c.aditdWait = time.Second
 	return f
 }
@@ -435,7 +471,8 @@ func TestInstallUsesTheAditdBesideAdit(t *testing.T) {
 	if f.installed[0] != "/opt/homebrew/Cellar/adit/1.0/bin/aditd" || f.installed[1] != "/opt/homebrew/Cellar/adit/1.0/bin/adit-tray" || f.installed[2] != "max" {
 		t.Errorf("installed %v", f.installed)
 	}
-	for _, want := range []string{"Installed aditd.\n", "aditd test is running, and starts whenever the Mac does.", "max can now use adit without sudo"} {
+	for _, want := range []string{"Installed aditd.\n", "aditd test is running, and starts whenever the Mac does.", "max can now use adit without sudo",
+		"Note: /opt/homebrew can be changed by accounts other than root"} {
 		if !strings.Contains(run.stdout.String(), want) {
 			t.Errorf("the output lacks %q:\n%s", want, run.stdout)
 		}

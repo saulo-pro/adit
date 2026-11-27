@@ -28,6 +28,7 @@ func New() *Installer { return &Installer{} }
 type Options struct {
 	Aditd, Tray, User string
 	UID               int
+	ReuseGroup        bool
 }
 
 func (i *Installer) Install(o Options, out io.Writer) error                   { return errUnsupported }

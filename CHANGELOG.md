@@ -20,6 +20,14 @@ notes of its GitHub release.
   WireGuard errors are logged once a minute with a count.
 - Status reads no longer pass the tunnels' private keys around, the tunnel store is excluded from
   Time Machine, and a crash while saving no longer leaves a copy of a configuration behind.
+- The menu bar icon starts from a root-owned copy instead of Homebrew's folder, which another
+  account's programs could change; `sudo adit install` checks and installs root-owned copies of
+  `aditd` and the icon, and says when their source folder is writable by other accounts.
+- `sudo adit export` hands the new file over before writing the key and never writes through a
+  link; `sudo adit import` reads only a regular file. Under `sudo`, `ADIT_SOCKET` is ignored.
+- `sudo adit install` refuses a group named adit it did not create unless `--reuse-group`, gives
+  the group it creates an unused id below 500, and `uninstall` deletes only a group adit created.
+- `adit version` says when `aditd` is older than `adit`.
 
 ### Changed
 

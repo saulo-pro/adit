@@ -12,6 +12,7 @@ import (
 	"strings"
 	"text/tabwriter"
 	"time"
+	"unicode/utf8"
 
 	"github.com/saulo-pro/adit/internal/api"
 )
@@ -141,13 +142,16 @@ func (c *CLI) importFile(ctx context.Context, out *output, args []string) error 
 		}
 		text, err = io.ReadAll(io.LimitReader(c.Stdin, api.MaxRequest))
 	} else {
-		text, err = os.ReadFile(files[0])
+		text, err = readImport(files[0])
 		if *name == "" {
 			*name = strings.TrimSuffix(filepath.Base(files[0]), filepath.Ext(files[0]))
 		}
 	}
 	if err != nil {
 		return fmt.Errorf("cannot read %s: %w", files[0], errors.Unwrap(err))
+	}
+	if !utf8.Valid(text) {
+		return fmt.Errorf("%s is not text: it is not valid UTF-8", files[0])
 	}
 
 	resp, err := c.Client.Do(ctx, api.Request{Command: api.CommandImport, Name: *name, File: string(text)})
@@ -197,20 +201,23 @@ func (c *CLI) export(ctx context.Context, out *output, args []string) error {
 	return nil
 }
 
+// writePrivate creates path, never through a link and never over an existing file, hands it to the
+// person who ran sudo through the open descriptor, and only then writes the key into it: no name is
+// looked up again between creating the file and giving it away.
 func (c *CLI) writePrivate(path string, data []byte) error {
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL|noFollow, 0o600)
 	if errors.Is(err, fs.ErrExist) {
 		return fmt.Errorf("%s already exists; adit will not overwrite it", path)
 	}
 	if err != nil {
 		return fmt.Errorf("cannot create %s: %w", path, errors.Unwrap(err))
 	}
-	_, err = file.Write(data)
+	err = c.giveToSudoUser(file)
+	if err == nil {
+		_, err = file.Write(data)
+	}
 	if closeErr := file.Close(); err == nil {
 		err = closeErr
-	}
-	if err == nil {
-		err = c.giveToSudoUser(path)
 	}
 	if err != nil {
 		os.Remove(path)
@@ -220,14 +227,39 @@ func (c *CLI) writePrivate(path string, data []byte) error {
 }
 
 // giveToSudoUser hands a file made under sudo to the person who typed sudo, so they can read it.
-func (c *CLI) giveToSudoUser(path string) error {
+func (c *CLI) giveToSudoUser(file *os.File) error {
 	uid, uidErr := strconv.Atoi(c.Getenv("SUDO_UID"))
 	gid, gidErr := strconv.Atoi(c.Getenv("SUDO_GID"))
 	if uidErr != nil || gidErr != nil || c.euid() != 0 {
 		return nil
 	}
-	return c.chown(path, uid, gid)
+	return c.chown(file, uid, gid)
 }
+
+// readImport reads a configuration file to import: never through a link, only a regular file, and
+// no more than aditd would accept. adit runs as root here, so the path must not lead it to read a
+// device or another file.
+func readImport(path string) ([]byte, error) {
+	file, err := os.OpenFile(path, os.O_RDONLY|noFollow|nonBlock, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, &fs.PathError{Op: "read", Path: path, Err: errors.New("not a regular file")}
+	}
+	if info.Size() > maxImport {
+		return nil, &fs.PathError{Op: "read", Path: path, Err: errors.New("too large to be a WireGuard configuration")}
+	}
+	return io.ReadAll(io.LimitReader(file, maxImport))
+}
+
+// maxImport is the most aditd accepts in a configuration file.
+const maxImport = 1 << 20
 
 func (c *CLI) remove(ctx context.Context, out *output, args []string) error {
 	names, err := parse(out, newFlags("remove"), args, 1, 1, "NAME")
@@ -252,6 +284,10 @@ func (c *CLI) version(ctx context.Context, out *output, args []string) error {
 	if resp, err := c.Client.Do(ctx, api.Request{Command: api.CommandVersion}); err == nil {
 		versions["aditd"] = resp.Version
 		words += fmt.Sprintf("aditd %s\n", resp.Version)
+		if resp.Version != c.Version {
+			// After an upgrade, root keeps running the old aditd until it is installed again.
+			words += fmt.Sprintf("aditd is %s but this adit is %s: run sudo adit install\n", resp.Version, c.Version)
+		}
 	} else {
 		words += fmt.Sprintf("aditd: %v\n", err)
 	}

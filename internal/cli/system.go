@@ -36,7 +36,8 @@ func needsRoot(c *CLI, command string) error {
 func (c *CLI) install(ctx context.Context, out *output, args []string) error {
 	flags := newFlags("install")
 	source := flags.String("aditd", "", "")
-	if _, err := parse(out, flags, args, 0, 0, "[--aditd PATH]"); err != nil {
+	reuse := flags.Bool("reuse-group", false, "")
+	if _, err := parse(out, flags, args, 0, 0, "[--aditd PATH] [--reuse-group]"); err != nil {
 		return err
 	}
 	if err := needsRoot(c, "install"); err != nil {
@@ -61,7 +62,24 @@ func (c *CLI) install(ctx context.Context, out *output, args []string) error {
 			break
 		}
 	}
-	version, err := c.runVersion(*source)
+	// Root runs and installs a copy only root can change, so the file checked is the file installed:
+	// the originals may sit in a folder other accounts can write, such as Homebrew's.
+	var progress strings.Builder
+	for _, original := range []string{*source, tray, self, resolved} {
+		if original == "" {
+			continue
+		}
+		if place := c.writableByOthers(original); place != "" {
+			fmt.Fprintf(&progress, "Note: %s can be changed by accounts other than root, and %s comes from there: whoever controls that folder controls what sudo adit runs.\n", place, filepath.Base(original))
+			break
+		}
+	}
+	staged, cleanUp, err := c.stage(*source, tray)
+	if err != nil {
+		return fmt.Errorf("there is no aditd to install at %s; give its path with --aditd", *source)
+	}
+	defer cleanUp()
+	version, err := c.runVersion(staged[0])
 	if err != nil {
 		return fmt.Errorf("there is no aditd to install at %s; give its path with --aditd", *source)
 	}
@@ -69,13 +87,12 @@ func (c *CLI) install(ctx context.Context, out *output, args []string) error {
 		return fmt.Errorf("the aditd at %s is version %s but this adit is %s; install the pair from one build", *source, version, c.Version)
 	}
 
-	var progress strings.Builder
 	user := c.Getenv("SUDO_USER")
 	uid, _ := strconv.Atoi(c.Getenv("SUDO_UID"))
 	if tray == "" {
 		progress.WriteString("No adit-tray beside adit, so no menu bar icon.\n")
 	}
-	if err := c.installer.Install(install.Options{Aditd: *source, Tray: tray, User: user, UID: uid}, &progress); err != nil {
+	if err := c.installer.Install(install.Options{Aditd: staged[0], Tray: staged[1], User: user, UID: uid, ReuseGroup: *reuse}, &progress); err != nil {
 		return err
 	}
 	running, err := c.waitForAditd(ctx)

@@ -53,8 +53,10 @@ binaries from `/usr/local/bin`.
 
 `sudo adit install` copies `aditd` to `/Library/PrivilegedHelperTools/pro.saulo.adit`, where only
 root can change it, and starts it now and at every boot. It also sets the menu bar icon to start at
-every login, and creates the `adit` group with you in it. Run it again after every
-`brew upgrade adit`.
+every login (from its own root-owned copy, `/Library/PrivilegedHelperTools/pro.saulo.adit.tray`), and
+creates the `adit` group with you in it. Run it again after every `brew upgrade adit`:
+`adit version` says when `aditd` is older than `adit`. To remove adit, run `sudo adit uninstall`
+before `brew uninstall adit`, or `aditd` keeps running.
 
 ## Use
 
@@ -79,11 +81,15 @@ allowed; 5 no such tunnel; 6 refused because of a conflict.
 - `aditd` runs as root and only does tunnel work. It answers on a Unix socket that belongs to
   `root:adit` with mode `0660`, and it also asks the kernel who each caller is. Members of the
   `adit` group may list, switch and watch tunnels. Adding, removing and exporting tunnels needs
-  `sudo`, so a program running as you cannot slip in a tunnel or read the keys.
+  `sudo`, so a program running as you cannot slip in a tunnel or read the keys through adit. One
+  limit: with Homebrew, the `adit` that `sudo adit` runs lives in a folder your account can write,
+  so a program running as you could replace it before you next type `sudo`. `sudo adit install`
+  says so, and installs only root-owned copies of what it checked.
 - `aditd` never runs a command or opens a path it was sent. Hook lines (`PreUp`, `PostUp`,
   `PreDown`, `PostDown`) are kept, so an export gives the file back unchanged, and never run.
 - Private keys stay in `/var/db/adit`, which only root can read, and never appear in output, logs
-  or the menu. Export writes a new file only, readable only by you.
+  or the menu. The store is left out of Time Machine. Export writes a new file only, readable only
+  by you, and never through a link. `aditd`'s log is readable by root alone.
 - No telemetry, and no network traffic but the tunnels' own.
 
 ## How it works
