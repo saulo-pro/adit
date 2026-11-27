@@ -212,12 +212,15 @@ func (s *Store) names() ([]string, error) {
 
 // find returns the stored spelling of name, or "" when there is no such tunnel.
 func (s *Store) find(name string) (string, error) {
+	if ValidName(name) != nil {
+		return "", nil
+	}
 	names, err := s.names()
 	if err != nil {
 		return "", err
 	}
 	for _, stored := range names {
-		if strings.EqualFold(stored, name) {
+		if asciiEqualFold(stored, name) {
 			return stored, nil
 		}
 	}
@@ -278,4 +281,25 @@ func (s *Store) write(name string, data []byte, replace bool) error {
 	} else {
 		return err
 	}
+}
+
+// asciiEqualFold compares names ignoring the case of ASCII letters only: Unicode folding would let
+// the Kelvin sign stand for k.
+func asciiEqualFold(a, b string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := 0; i < len(a); i++ {
+		x, y := a[i], b[i]
+		if 'A' <= x && x <= 'Z' {
+			x += 'a' - 'A'
+		}
+		if 'A' <= y && y <= 'Z' {
+			y += 'a' - 'A'
+		}
+		if x != y {
+			return false
+		}
+	}
+	return true
 }

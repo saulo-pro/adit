@@ -203,14 +203,10 @@ func newFlags(name string) *flag.FlagSet {
 }
 
 // New is the command line as people run it. ADIT_SOCKET points it at another aditd, for testing;
-// under sudo it is ignored, so a variable in the environment cannot send a key elsewhere.
+// under sudo adit talks only to an aditd running as root, wherever the socket is.
 func New(version string, stdin io.Reader, stdout, stderr io.Writer) *CLI {
-	socket := os.Getenv("ADIT_SOCKET")
-	if os.Geteuid() == 0 {
-		socket = ""
-	}
 	return &CLI{
-		Client:  &api.Client{Socket: socket},
+		Client:  &api.Client{Socket: os.Getenv("ADIT_SOCKET"), RootPeer: os.Geteuid() == 0},
 		Version: version,
 		Stdin:   stdin,
 		Stdout:  stdout,

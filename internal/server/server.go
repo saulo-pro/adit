@@ -12,6 +12,7 @@ import (
 	"net"
 	"slices"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/saulo-pro/adit/internal/api"
@@ -57,6 +58,18 @@ var needsName = map[string]bool{
 
 var known = map[string]bool{api.CommandList: true, api.CommandWatch: true, api.CommandVersion: true}
 
+// readOnly requests are logged at debug level only: the tray asks often.
+var readOnly = map[string]bool{api.CommandList: true, api.CommandStatus: true, api.CommandVersion: true, api.CommandWatch: true}
+
+// Limits on what callers may hold, so a member of the group cannot exhaust aditd: connections at
+// once, watchers per account, and the size of a request from anyone but root (whose imports carry
+// a whole file).
+const (
+	maxConnections    = 64
+	maxWatchersPerUID = 8
+	maxMemberRequest  = 16 << 10
+)
+
 type Server struct {
 	tunnels Tunnels
 	version string
@@ -66,6 +79,11 @@ type Server struct {
 	authorize func(conn *net.UnixConn) (role, int, error)
 	// poll is how often a watch looks again for changes that come without a signal: handshakes.
 	poll time.Duration
+	// member says again whether a uid is in the adit group, for watches that last.
+	member func(uid int) (bool, error)
+
+	watchMu  sync.Mutex
+	watchers map[int]int // uid → watches open
 }
 
 // New serves tunnels to root and to members of group; an empty group means root only.
@@ -76,6 +94,7 @@ func New(tunnels Tunnels, group, version string, log *slog.Logger) *Server {
 		log:       log,
 		authorize: func(conn *net.UnixConn) (role, int, error) { return authorize(conn, group) },
 		poll:      time.Second,
+		member:    func(uid int) (bool, error) { return inGroup(uid, group) },
 	}
 }
 
@@ -97,23 +116,52 @@ func authorize(conn *net.UnixConn, group string) (role, int, error) {
 	return roleNone, uid, nil
 }
 
-// Serve answers connections until ctx ends, then waits for the ones in progress.
+// Serve answers connections until ctx ends, then waits for the ones in progress. An error that may
+// pass (too many open files, a client that hung up) waits and tries again; any other ends Serve, so
+// aditd exits and launchd starts it again, rather than living on deaf.
 func (s *Server) Serve(ctx context.Context, l *net.UnixListener) error {
 	stop := context.AfterFunc(ctx, func() { l.Close() })
 	defer stop()
 
+	slots := make(chan struct{}, maxConnections)
 	var wg sync.WaitGroup
 	defer wg.Wait()
+	wait := 5 * time.Millisecond
 	for {
 		conn, err := l.AcceptUnix()
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil
 			}
+			if temporary(err) {
+				s.log.Warn("could not accept a connection; trying again", "error", err)
+				select {
+				case <-ctx.Done():
+					return nil
+				case <-time.After(wait):
+				}
+				wait = min(2*wait, time.Second)
+				continue
+			}
 			return err
 		}
-		wg.Go(func() { s.handle(ctx, conn) })
+		wait = 5 * time.Millisecond
+		select {
+		case slots <- struct{}{}:
+			wg.Go(func() {
+				defer func() { <-slots }()
+				s.handle(ctx, conn)
+			})
+		default:
+			s.reply(conn, json.NewEncoder(conn), failure(api.CodeFailed, "aditd is busy with too many connections; try again"))
+			conn.Close()
+		}
 	}
+}
+
+func temporary(err error) bool {
+	return errors.Is(err, syscall.EMFILE) || errors.Is(err, syscall.ENFILE) || errors.Is(err, syscall.ENOBUFS) ||
+		errors.Is(err, syscall.ENOMEM) || errors.Is(err, syscall.ECONNABORTED)
 }
 
 func (s *Server) handle(ctx context.Context, conn *net.UnixConn) {
@@ -127,36 +175,62 @@ func (s *Server) handle(ctx context.Context, conn *net.UnixConn) {
 		return
 	}
 
+	if role == roleNone {
+		// Nothing is read from someone who may not use adit.
+		s.log.Info("refused a caller outside the adit group", "uid", uid)
+		s.reply(conn, encoder, failure(api.CodeNotAllowed, "you may not use adit: you are not in the adit group; an administrator can add you with sudo adit allow "+username(uid)))
+		return
+	}
+	limit := int64(maxMemberRequest)
+	if role == roleRoot {
+		limit = api.MaxRequest
+	}
 	conn.SetReadDeadline(time.Now().Add(10 * time.Second))
 	var req api.Request
-	if err := json.NewDecoder(io.LimitReader(conn, api.MaxRequest)).Decode(&req); err != nil {
+	if err := json.NewDecoder(io.LimitReader(conn, limit)).Decode(&req); err != nil {
 		s.reply(conn, encoder, failure(api.CodeBadRequest, "the request is not a JSON object aditd understands"))
 		return
 	}
 	conn.SetReadDeadline(time.Time{})
 
+	// Refuse what aditd does not know before logging it: a caller's strings go into root's log only
+	// when they are a known command and a name short enough to be one.
+	if !known[req.Command] && !needsName[req.Command] {
+		s.reply(conn, encoder, failure(api.CodeBadRequest, "aditd does not know that command"))
+		return
+	}
+	if len(req.Name) > 128 {
+		s.reply(conn, encoder, failure(api.CodeBadRequest, "that name is too long to be a tunnel's"))
+		return
+	}
 	log := s.log.With("command", req.Command, "uid", uid)
 	if req.Name != "" {
 		log = log.With("tunnel", req.Name)
 	}
 	var resp api.Response
 	switch {
-	case role == roleNone:
-		resp = failure(api.CodeNotAllowed, "you may not use adit: you are not in the adit group; an administrator can add you with sudo adit allow "+username(uid))
 	case rootOnly[req.Command] && role != roleRoot:
 		resp = failure(api.CodeNotAllowed, fmt.Sprintf("%s needs root: run it with sudo", req.Command))
 	case req.Command == api.CommandWatch:
+		if !s.startWatch(uid) {
+			resp = failure(api.CodeFailed, fmt.Sprintf("this account already has %d watchers; close one first", maxWatchersPerUID))
+			break
+		}
+		defer s.endWatch(uid)
 		log.Debug("watching")
-		s.watch(ctx, conn, encoder)
+		s.watch(ctx, conn, encoder, uid, role)
 		return
 	default:
 		resp = s.dispatch(ctx, req)
 		resp = s.otherSoftware(req, resp)
 	}
 
-	if resp.OK {
+	switch {
+	case resp.OK && readOnly[req.Command]:
+		log.Debug("done")
+	case resp.OK:
 		log.Info("done")
-	} else {
+	default:
 		log.Info("refused", "code", resp.Error.Code, "reason", resp.Error.Message)
 	}
 	s.reply(conn, encoder, resp)
@@ -222,12 +296,15 @@ func (s *Server) dispatch(ctx context.Context, req api.Request) api.Response {
 		}
 		return api.Response{OK: true}
 
-	default: // export
+	case api.CommandExport:
 		file, err := s.tunnels.File(req.Name)
 		if err != nil {
 			return fail(err)
 		}
 		return api.Response{OK: true, File: string(file)}
+
+	default:
+		return failure(api.CodeBadRequest, "aditd does not know that command")
 	}
 }
 
@@ -263,7 +340,7 @@ func (s *Server) tunnel(name string) api.Response {
 
 // watch sends every tunnel now and again whenever something a person would see changes: byte
 // counters alone do not count, or a busy tunnel would send every second.
-func (s *Server) watch(ctx context.Context, conn *net.UnixConn, encoder *json.Encoder) {
+func (s *Server) watch(ctx context.Context, conn *net.UnixConn, encoder *json.Encoder, uid int, role role) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	go func() {
@@ -275,6 +352,10 @@ func (s *Server) watch(ctx context.Context, conn *net.UnixConn, encoder *json.En
 	defer stop()
 	ticker := time.NewTicker(s.poll)
 	defer ticker.Stop()
+
+	// A caller taken out of the adit group stops being served within a minute.
+	recheck := time.NewTicker(time.Minute)
+	defer recheck.Stop()
 
 	var last, lastOthers []api.Tunnel
 	for first := true; ; first = false {
@@ -296,7 +377,36 @@ func (s *Server) watch(ctx context.Context, conn *net.UnixConn, encoder *json.En
 			return
 		case <-changes:
 		case <-ticker.C:
+		case <-recheck.C:
+			if role != roleRoot {
+				if member, err := s.member(uid); err != nil || !member {
+					s.reply(conn, encoder, failure(api.CodeNotAllowed, "you are no longer in the adit group"))
+					return
+				}
+			}
 		}
+	}
+}
+
+// startWatch counts a watcher for uid, and says whether it may have one more.
+func (s *Server) startWatch(uid int) bool {
+	s.watchMu.Lock()
+	defer s.watchMu.Unlock()
+	if s.watchers[uid] >= maxWatchersPerUID {
+		return false
+	}
+	if s.watchers == nil {
+		s.watchers = map[int]int{}
+	}
+	s.watchers[uid]++
+	return true
+}
+
+func (s *Server) endWatch(uid int) {
+	s.watchMu.Lock()
+	defer s.watchMu.Unlock()
+	if s.watchers[uid]--; s.watchers[uid] <= 0 {
+		delete(s.watchers, uid)
 	}
 }
 

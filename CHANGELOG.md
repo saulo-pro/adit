@@ -24,7 +24,8 @@ notes of its GitHub release.
   account's programs could change; `sudo adit install` checks and installs root-owned copies of
   `aditd` and the icon, and says when their source folder is writable by other accounts.
 - `sudo adit export` hands the new file over before writing the key and never writes through a
-  link; `sudo adit import` reads only a regular file. Under `sudo`, `ADIT_SOCKET` is ignored.
+  link; `sudo adit import` reads only a regular file. Under `sudo`, adit talks only to an `aditd`
+  running as root.
 - `sudo adit install` refuses a group named adit it did not create unless `--reuse-group`, gives
   the group it creates an unused id below 500, and `uninstall` deletes only a group adit created.
 - `adit version` says when `aditd` is older than `adit`.
@@ -41,6 +42,13 @@ notes of its GitHub release.
   link-local, multicast and unroutable AllowedIPs, link-local addresses and reserved ListenPorts
   are refused. Table, SaveConfig and FwMark lines draw a warning: adit ignores them.
 - A peer's endpoint no longer moves to wherever one of its packets came from.
+- `aditd` holds up under load: at most 64 connections and 8 watchers per account, small requests
+  from anyone but root, nothing read from callers outside the adit group, unknown commands refused
+  before they are logged, and a temporary accept error no longer stops it answering. A watch ends
+  when its account leaves the adit group.
+- After a network change, a tunnel's UDP socket comes back even if its port was taken meanwhile;
+  taking a tunnel down while it is coming up waits for it to let go of its device, and DNS for a
+  tunnel stops before its device does. Tunnel names match with ASCII case folding only.
 
 ### Changed
 
