@@ -28,10 +28,12 @@ const (
 	DefaultStateFile = "/var/run/adit/firewall.json"
 )
 
-// Rules are what the kill switch lets through.
+// Rules are what the anchor lets through. With BlockAll (the kill switch), only adit's tunnels and
+// what they need; without it, everything but the local network (a full tunnel's `lan block`).
 type Rules struct {
 	Interfaces []string         // adit's tunnel interfaces that are up
 	Servers    []netip.AddrPort // every adit tunnel's server: only root (aditd) may send to them
+	BlockAll   bool             // the kill switch: block what does not go through adit's tunnels
 	AllowLAN   bool             // the local network: printers, file shares, AirDrop
 	Guards     []string         // the full tunnels the kill switch is on for; kept for aditd's next start
 }
@@ -117,11 +119,15 @@ func (f *Firewall) loaded() bool {
 	return err == nil && strings.Contains(string(output), "block ")
 }
 
-// lan is the local network as the market's "allow LAN" means it: private, link-local and multicast.
+// lan is the local network as the market's "allow LAN" means it: private, link-local and multicast
+// IPv4, and unique local IPv6.
 var lan = []string{
-	"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16", "224.0.0.0/4", "255.255.255.255/32",
-	"fe80::/10", "fc00::/7", "ff00::/8",
+	"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16", "224.0.0.0/4", "255.255.255.255/32", "fc00::/7",
 }
+
+// link is IPv6's link-local and multicast: neighbour discovery and router advertisements need them
+// for IPv6 to work at all, so they pass whatever the local network setting.
+var link = []string{"fe80::/10", "ff00::/8"}
 
 // Ruleset writes the anchor's rules. pf reads them top to bottom and stops at the first quick rule
 // that matches. Passes on loopback, the tunnels and the local network keep no state: a connection
@@ -130,7 +136,11 @@ var lan = []string{
 // never from text a person typed.
 func Ruleset(r Rules) string {
 	var b strings.Builder
-	b.WriteString("# adit's kill switch: what does not go through adit's tunnels is blocked.\n")
+	if r.BlockAll {
+		b.WriteString("# adit's kill switch: what does not go through adit's tunnels is blocked.\n")
+	} else {
+		b.WriteString("# adit's full tunnel blocks the local network.\n")
+	}
 	b.WriteString("pass quick on lo0 no state\n")
 	if len(r.Interfaces) > 0 {
 		fmt.Fprintf(&b, "pass quick on { %s } no state\n", strings.Join(r.Interfaces, " "))
@@ -138,20 +148,30 @@ func Ruleset(r Rules) string {
 	for _, server := range r.Servers {
 		fmt.Fprintf(&b, "pass out quick proto udp to %s port %d user root keep state\n", server.Addr().Unmap(), server.Port())
 	}
-	// aditd looks the servers' names up itself, as root; nobody else's DNS leaves outside a tunnel.
-	b.WriteString("pass out quick proto { udp tcp } to any port 53 user root keep state\n")
 	// DHCP, so the Mac can join a network at all.
 	b.WriteString("pass out quick inet proto udp from any port 68 to any port 67 no state\n")
 	b.WriteString("pass in quick inet proto udp from any port 67 to any port 68 no state\n")
-	b.WriteString("block return out quick proto { udp tcp } to any port 53\n")
+	// By direction, here and below: out to the local network, in from it. "From a private address"
+	// would match everything a Mac behind a router sends, since its own address is one.
+	fmt.Fprintf(&b, "pass out quick to { %s } no state\n", strings.Join(link, " "))
+	fmt.Fprintf(&b, "pass in quick from { %s } no state\n", strings.Join(link, " "))
+	if r.BlockAll {
+		// aditd looks the servers' names up itself, as root; nobody else's DNS leaves outside a
+		// tunnel.
+		b.WriteString("pass out quick proto { udp tcp } to any port 53 user root keep state\n")
+		b.WriteString("block return out quick proto { udp tcp } to any port 53\n")
+	}
 	if r.AllowLAN {
-		// By direction: out to the local network, in from it. "From a private address" would pass
-		// everything a Mac behind a router sends, since its own address is one.
 		fmt.Fprintf(&b, "pass out quick to { %s } no state\n", strings.Join(lan, " "))
 		fmt.Fprintf(&b, "pass in quick from { %s } no state\n", strings.Join(lan, " "))
+	} else {
+		fmt.Fprintf(&b, "block return out quick to { %s }\n", strings.Join(lan, " "))
+		fmt.Fprintf(&b, "block drop in quick from { %s }\n", strings.Join(lan, " "))
 	}
-	b.WriteString("block return out quick all\n")
-	b.WriteString("block drop in quick all\n")
+	if r.BlockAll {
+		b.WriteString("block return out quick all\n")
+		b.WriteString("block drop in quick all\n")
+	}
 	return b.String()
 }
 

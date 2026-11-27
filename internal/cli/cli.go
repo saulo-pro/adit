@@ -30,6 +30,7 @@ Usage:
   adit up NAME                     bring a tunnel up
   adit down NAME                   take a tunnel down
   adit autostart NAME on|off       whether it comes up when the Mac starts
+  adit route ADDRESS|NAME          which tunnel carries it, and who looks the name up
   adit signin                      lift the kill switch for 2 minutes to sign in
                                    to a hotel's or airport's network
   sudo adit import FILE [--name NAME]
@@ -41,6 +42,8 @@ Usage:
                                    when a full tunnel blocks the internet: while
                                    it is not up (on-drop, the default), also while
                                    it is down by choice (always), or never
+  sudo adit lan NAME allow|block   whether a full tunnel lets the local network
+                                   (printers, shares, AirDrop) be reached
   sudo adit install [--aditd PATH] install aditd, start it now and at every boot,
                                    and let you use adit without a password
   sudo adit uninstall [--keep-tunnels] [--yes]
@@ -74,6 +77,8 @@ type CLI struct {
 	euid  func() int
 	// openURL opens a page in the person's browser; /usr/bin/open when nil.
 	openURL func(url string) error
+	// routeTools are what `adit route` reads; the Mac's own when empty.
+	routeTools routeTools
 
 	// The system around adit, for install and friends; fakes in tests.
 	installer  installer
@@ -99,6 +104,8 @@ var commands = map[string]command{
 	"down":       (*CLI).down,
 	"autostart":  (*CLI).autostart,
 	"killswitch": (*CLI).killswitch,
+	"lan":        (*CLI).lan,
+	"route":      (*CLI).route,
 	"signin":     (*CLI).signin,
 	"import":     (*CLI).importFile,
 	"export":     (*CLI).export,

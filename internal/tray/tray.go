@@ -7,7 +7,9 @@
 package tray
 
 import (
+	"cmp"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -39,6 +41,18 @@ const maxDetail = 70
 // Rows lays out the menu. failures are the sentences from clicks that failed, by tunnel.
 func Rows(tunnels, others []api.Tunnel, failures map[string]string, now time.Time) []Row {
 	var rows []Row
+	// The full tunnel comes first: it decides where everything else goes.
+	tunnels = slices.Clone(tunnels)
+	slices.SortStableFunc(tunnels, func(a, b api.Tunnel) int {
+		return cmp.Compare(btoi(a.KillSwitch == ""), btoi(b.KillSwitch == ""))
+	})
+	blocking := false
+	for _, t := range tunnels {
+		blocking = blocking || t.Blocking
+	}
+	if summary := api.Summary(tunnels); summary != "" && !blocking {
+		rows = append(rows, Row{Kind: KindMessage, Title: shorten(summary), Tooltip: summary}, Row{Kind: KindSeparator})
+	}
 	for _, t := range tunnels {
 		if t.Blocking {
 			rows = append(rows,
@@ -95,14 +109,25 @@ func Count(tunnels []api.Tunnel) string {
 }
 
 func title(t api.Tunnel, now time.Time) string {
+	name := t.Name
+	if t.KillSwitch != "" {
+		name += " (all traffic)"
+	}
 	switch {
 	case t.State == "down":
-		return t.Name
+		return name
 	case t.LastHandshake != nil:
-		return fmt.Sprintf("%s — %s · %s", t.Name, t.State, age(now.Sub(*t.LastHandshake)))
+		return fmt.Sprintf("%s — %s · %s", name, t.State, age(now.Sub(*t.LastHandshake)))
 	default:
-		return fmt.Sprintf("%s — %s", t.Name, t.State)
+		return fmt.Sprintf("%s — %s", name, t.State)
 	}
+}
+
+func btoi(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 func tooltip(t api.Tunnel) string {

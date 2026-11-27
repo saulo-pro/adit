@@ -32,6 +32,7 @@ const (
 	CommandRemove     = "remove"
 	CommandExport     = "export"
 	CommandKillSwitch = "killswitch"
+	CommandLAN        = "lan"
 )
 
 // MaxRequest bounds what aditd reads from one caller: an imported file is at most 1 MiB, and JSON
@@ -43,7 +44,7 @@ type Request struct {
 	Name    string `json:"name,omitempty"`
 	File    string `json:"file,omitempty"` // import: the file's text, never a path
 	On      *bool  `json:"on,omitempty"`   // autostart
-	Mode    string `json:"mode,omitempty"` // killswitch: off, on-drop or always
+	Mode    string `json:"mode,omitempty"` // killswitch: off, on-drop or always; lan: allow or block
 }
 
 type Response struct {
@@ -64,6 +65,7 @@ type Tunnel struct {
 	Autostart     bool       `json:"autostart"`
 	KillSwitch    string     `json:"killswitch,omitempty"` // a full tunnel's: off, on-drop or always
 	Blocking      bool       `json:"blocking,omitempty"`   // its kill switch blocks the internet now
+	LAN           string     `json:"lan,omitempty"`        // a full tunnel's local network: allow or block
 	Interface     string     `json:"interface,omitempty"`
 	LastHandshake *time.Time `json:"last_handshake,omitempty"`
 	ReceivedBytes uint64     `json:"received_bytes"`

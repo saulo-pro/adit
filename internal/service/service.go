@@ -50,6 +50,7 @@ type Status struct {
 	Notes         []string // what a person should know about it, one sentence each
 	KillSwitch    string   // a full tunnel's kill switch setting; empty for a split tunnel
 	Blocking      bool     // its kill switch blocks the internet now: it is not up
+	LAN           string   // a full tunnel's local network setting: allow or block
 	Source        string   // "adit", or the other software running it
 	ReadOnly      bool     // another program's tunnel: adit shows it and leaves it alone
 }
@@ -481,14 +482,15 @@ func (m *Manager) apply() error {
 	}
 
 	guards, resume := m.guards()
-	if len(guards) == 0 || m.now().Before(m.pausedUntil) {
+	lanBlocked := m.lanBlocked(guards)
+	if len(guards) == 0 && !lanBlocked || m.now().Before(m.pausedUntil) {
 		if err := m.firewall.Release(); err != nil {
 			return fmt.Errorf("adit could not turn the kill switch off: %w", err)
 		}
 		return nil
 	}
 	slices.Sort(interfaces)
-	rules := firewall.Rules{Interfaces: interfaces, Servers: endpoints, AllowLAN: true, Guards: resume}
+	rules := firewall.Rules{Interfaces: interfaces, Servers: endpoints, BlockAll: len(guards) > 0, AllowLAN: !lanBlocked, Guards: resume}
 	if err := m.firewall.Block(rules); err != nil {
 		return fmt.Errorf("adit could not turn the kill switch on: %w", err)
 	}
@@ -536,6 +538,23 @@ func minutes(d time.Duration) string {
 		return fmt.Sprintf("%d minutes", n)
 	}
 	return "a minute"
+}
+
+// lanBlocked says whether a full tunnel that is up, coming up or guarded by its kill switch blocks
+// the local network. Called with m.mu held.
+func (m *Manager) lanBlocked(guards []string) bool {
+	tunnels, _ := m.store.List()
+	for _, t := range tunnels {
+		if t.Settings.LANMode() != store.LANBlock {
+			continue
+		}
+		_, up := m.running[t.Name]
+		_, coming := m.starting[t.Name]
+		if full4, _ := covers(t.Config); full4 && (up || coming || slices.Contains(guards, t.Name)) {
+			return true
+		}
+	}
+	return false
 }
 
 // blockingNow are the full tunnels whose kill switch blocks now: none while it is lifted to sign
@@ -843,7 +862,7 @@ func sameDomain(a, b string) bool {
 }
 
 // fullNotes say what a full tunnel does while it is up.
-func fullNotes(s shape, killSwitch string) []string {
+func fullNotes(s shape, killSwitch, lan string) []string {
 	drop := "if it drops, traffic goes out directly (kill switch off)"
 	switch killSwitch {
 	case store.KillSwitchOnDrop:
@@ -851,7 +870,11 @@ func fullNotes(s shape, killSwitch string) []string {
 	case store.KillSwitchAlways:
 		drop = "whenever it is down, the internet is blocked (kill switch: always)"
 	}
-	notes := []string{"it routes all traffic but the local network's and adit's other tunnels', and its DNS servers answer every name but the other tunnels' domains; " + drop}
+	routes := "it routes all traffic but the local network's and adit's other tunnels'"
+	if lan == store.LANBlock {
+		routes = "it routes all traffic but adit's other tunnels', and the local network is blocked"
+	}
+	notes := []string{routes + ", and its DNS servers answer every name but the other tunnels' domains; " + drop}
 	if !s.ipv6 {
 		notes = append(notes, "IPv6 is blocked while it is up, since it carries only IPv4")
 	}
@@ -965,6 +988,32 @@ func (m *Manager) SetKillSwitch(name, mode string) error {
 	return err
 }
 
+// SetLAN chooses whether a full tunnel lets the local network be reached: LANAllow or LANBlock.
+func (m *Manager) SetLAN(name, mode string) error {
+	if mode != store.LANAllow && mode != store.LANBlock {
+		return fmt.Errorf("the local network is %s or %s, not %q", store.LANAllow, store.LANBlock, mode)
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	t, err := m.store.Get(name)
+	if err != nil {
+		return err
+	}
+	if full4, _ := covers(t.Config); !full4 {
+		return fmt.Errorf("%s routes only its own networks, so the local network is not its to block; the setting is for a full tunnel", t.Name)
+	}
+	settings := t.Settings
+	settings.LAN = mode
+	if err := m.store.SetSettings(t.Name, settings); err != nil {
+		return err
+	}
+	m.log.Info("local network setting changed", "tunnel", t.Name, "lan", mode)
+	err = m.apply()
+	m.notify()
+	return err
+}
+
 // SignIn lifts the kill switch for a short while, so a hotel's or an airport's sign-in page can be
 // reached before the full tunnel can connect. It returns when the kill switch comes back.
 func (m *Manager) SignIn() (time.Time, error) {
@@ -1029,6 +1078,7 @@ func (m *Manager) status(t *store.Tunnel, blocking []string) (Status, error) {
 	full4, _ := covers(t.Config)
 	if full4 {
 		status.KillSwitch = t.Settings.KillSwitchMode()
+		status.LAN = t.Settings.LANMode()
 	}
 	_, up := m.running[t.Name]
 	if full4 && !up && slices.Contains(blocking, t.Name) {
@@ -1058,7 +1108,7 @@ func (m *Manager) status(t *store.Tunnel, blocking []string) (Status, error) {
 		return status, nil
 	}
 	if r.shape.full {
-		status.Notes = append(fullNotes(r.shape, status.KillSwitch), status.Notes...)
+		status.Notes = append(fullNotes(r.shape, status.KillSwitch, status.LAN), status.Notes...)
 	}
 	status.Notes = append(status.Notes, r.notes...)
 	status.Notes = append(status.Notes, r.live...)

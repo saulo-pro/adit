@@ -1051,6 +1051,7 @@ func TestTheKillSwitchGuardsAFullTunnelUntilItIsTakenDown(t *testing.T) {
 	want := firewall.Rules{
 		Interfaces: []string{"utun20", "utun21"},
 		Servers:    []netip.AddrPort{netip.MustParseAddrPort("198.51.100.7:51820"), netip.MustParseAddrPort("203.0.113.10:51820")},
+		BlockAll:   true,
 		AllowLAN:   true,
 		Guards:     []string{"manhattan"},
 	}
@@ -1225,5 +1226,61 @@ func TestSignInLiftsTheKillSwitchForAWhile(t *testing.T) {
 			t.Fatal("the kill switch did not come back")
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestLANBlockWithTheKillSwitchOff(t *testing.T) {
+	m, _ := newTestManager(t)
+	fw := m.firewall.(*fakeFirewall)
+	importText(t, m, "manhattan", fullFile("0.0.0.0/0", "10.64.0.1"))
+	m.SetKillSwitch("manhattan", "off")
+	if err := m.SetLAN("manhattan", "block"); err != nil {
+		t.Fatal(err)
+	}
+	if fw.rules != nil {
+		t.Fatal("blocking the local network while the full tunnel is down")
+	}
+	if err := m.Up(context.Background(), "manhattan"); err != nil {
+		t.Fatal(err)
+	}
+	if fw.rules == nil || fw.rules.BlockAll || fw.rules.AllowLAN {
+		t.Errorf("rules %+v, want the local network blocked and nothing else", fw.rules)
+	}
+	status, _ := m.Status("manhattan")
+	if status.LAN != "block" || !strings.Contains(strings.Join(status.Notes, " "), "the local network is blocked") {
+		t.Errorf("status %+v", status)
+	}
+	m.Down("manhattan")
+	if fw.rules != nil {
+		t.Error("the local network stayed blocked with the full tunnel down")
+	}
+}
+
+func TestLANBlockWithTheKillSwitch(t *testing.T) {
+	m, _ := newTestManager(t)
+	fw := m.firewall.(*fakeFirewall)
+	importText(t, m, "manhattan", fullFile("0.0.0.0/0", "10.64.0.1"))
+	m.SetLAN("manhattan", "block")
+	m.SetKillSwitch("manhattan", "always")
+	if fw.rules == nil || !fw.rules.BlockAll || fw.rules.AllowLAN {
+		t.Errorf("rules %+v", fw.rules)
+	}
+	if err := m.SetLAN("manhattan", "allow"); err != nil {
+		t.Fatal(err)
+	}
+	if !fw.rules.AllowLAN {
+		t.Error("allow did not let the local network through")
+	}
+}
+
+func TestLANIsAFullTunnelsSetting(t *testing.T) {
+	m, _ := newTestManager(t)
+	mustImport(t, m, "diner")
+	if err := m.SetLAN("diner", "block"); err == nil || !strings.Contains(err.Error(), "the setting is for a full tunnel") {
+		t.Errorf("got %v", err)
+	}
+	importText(t, m, "manhattan", fullFile("0.0.0.0/0", "10.64.0.1"))
+	if err := m.SetLAN("manhattan", "sometimes"); err == nil {
+		t.Error("a made-up setting was taken")
 	}
 }

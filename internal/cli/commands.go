@@ -49,7 +49,7 @@ func (c *CLI) printAll(ctx context.Context, out *output) error {
 	if err != nil {
 		return err
 	}
-	c.print(out, map[string]any{"tunnels": c.jsonTunnels(resp.Tunnels), "others": c.jsonTunnels(resp.Others)},
+	c.print(out, map[string]any{"tunnels": c.jsonTunnels(resp.Tunnels), "others": c.jsonTunnels(resp.Others), "summary": api.Summary(resp.Tunnels)},
 		c.table(resp.Tunnels, resp.Others))
 	return nil
 }
@@ -123,6 +123,27 @@ func (c *CLI) killswitch(ctx context.Context, out *output, args []string) error 
 		"always":  fmt.Sprintf("Whenever %s is not up, even when taken down, the internet is blocked.\n", name),
 		"off":     fmt.Sprintf("If %s drops, traffic goes out directly.\n", name),
 	}[mode]
+	c.print(out, c.jsonTunnel(*resp.Tunnel), words)
+	return nil
+}
+
+func (c *CLI) lan(ctx context.Context, out *output, args []string) error {
+	positional, err := parse(out, newFlags("lan"), args, 2, 2, "NAME allow|block")
+	if err != nil {
+		return err
+	}
+	mode := positional[1]
+	if mode != "allow" && mode != "block" {
+		return usageError("usage: sudo adit lan NAME allow|block")
+	}
+	resp, err := c.Client.Do(ctx, api.Request{Command: api.CommandLAN, Name: positional[0], Mode: mode})
+	if err != nil {
+		return err
+	}
+	words := fmt.Sprintf("While %s is up, the local network (printers, shares, AirDrop) can be reached.\n", resp.Tunnel.Name)
+	if mode == "block" {
+		words = fmt.Sprintf("While %s is up, the local network is blocked: nothing on it is reached, nor reaches this Mac.\n", resp.Tunnel.Name)
+	}
 	c.print(out, c.jsonTunnel(*resp.Tunnel), words)
 	return nil
 }
@@ -214,7 +235,7 @@ func (c *CLI) importFile(ctx context.Context, out *output, args []string) error 
 		fmt.Fprintf(c.Stderr, "adit: %s\n", safeForTerminal(warning))
 	}
 	fmt.Fprintf(&words, "Imported %s. Bring it up with: adit up %s\n", resp.Tunnel.Name, resp.Tunnel.Name)
-	words.WriteString(whatItChanges(text))
+	words.WriteString(whatItChanges(resp.Tunnel.Name, text))
 	warnings := resp.Warnings
 	if warnings == nil {
 		warnings = []string{}
@@ -354,6 +375,7 @@ type jsonTunnel struct {
 	Autostart           bool       `json:"autostart"`
 	KillSwitch          *string    `json:"killswitch"` // a full tunnel's; null for a split tunnel
 	Blocking            bool       `json:"blocking"`   // its kill switch blocks the internet now
+	LAN                 *string    `json:"lan"`        // a full tunnel's local network: allow or block; null for a split tunnel
 	Interface           *string    `json:"interface"`
 	LastHandshake       *time.Time `json:"last_handshake"`
 	HandshakeAgeSeconds *int64     `json:"handshake_age_seconds"`
@@ -379,6 +401,9 @@ func (c *CLI) jsonTunnel(t api.Tunnel) jsonTunnel {
 		j.KillSwitch = &t.KillSwitch
 	}
 	j.Blocking = t.Blocking
+	if t.LAN != "" {
+		j.LAN = &t.LAN
+	}
 	j.Notes = t.Notes
 	if j.Notes == nil {
 		j.Notes = []string{}
@@ -414,6 +439,9 @@ func (c *CLI) table(tunnels, others []api.Tunnel) string {
 			c.bytes(t, t.ReceivedBytes), c.bytes(t, t.SentBytes), t.Source)
 	}
 	w.Flush()
+	if summary := api.Summary(tunnels); summary != "" {
+		fmt.Fprintf(&b, "\n%s\n", summary)
+	}
 	return b.String()
 }
 
@@ -444,6 +472,9 @@ func (c *CLI) details(t api.Tunnel) string {
 	}
 	if t.KillSwitch != "" {
 		fmt.Fprintf(w, "  kill switch\t%s\n", t.KillSwitch)
+	}
+	if t.LAN != "" {
+		fmt.Fprintf(w, "  local network\t%s\n", t.LAN)
 	}
 	w.Flush()
 	if t.State == "idle" {
@@ -524,7 +555,7 @@ func notes(t api.Tunnel) string {
 
 // whatItChanges says what a tunnel will change on the Mac once up, from its file: the administrator
 // should know before any member of the adit group brings it up.
-func whatItChanges(text []byte) string {
+func whatItChanges(name string, text []byte) string {
 	c, err := conf.Parse(text)
 	if err != nil {
 		return ""
@@ -553,6 +584,8 @@ func whatItChanges(text []byte) string {
 		} else {
 			b.WriteString("but it needs a DNS line to come up: without one, names would be looked up outside it\n")
 		}
+		fmt.Fprintf(&b, "Kill switch on: while it is coming up or has dropped, the internet is blocked (sudo adit killswitch %s always|off to change)\n", name)
+		fmt.Fprintf(&b, "The local network stays reachable (sudo adit lan %s block to block it)\n", name)
 	case len(routes) > 0:
 		fmt.Fprintf(&b, "When up, it routes: %s\n", strings.Join(routes, ", "))
 	}

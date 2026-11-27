@@ -127,3 +127,21 @@ func TestOverlapOnLabelBoundaries(t *testing.T) {
 		}
 	}
 }
+
+func TestForFindsTheMostSpecificFile(t *testing.T) {
+	r := &Resolvers{Dir: t.TempDir()}
+	if err := r.Set("diner", []netip.Addr{netip.MustParseAddr("10.99.2.1")}, []string{"diner.example"}); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(filepath.Join(r.Dir, "example"), []byte("nameserver 192.0.2.53\n"), 0o644)
+	answer, ok := r.For("www.Diner.example.")
+	if !ok || answer.Domain != "diner.example" || answer.Owner != "diner" || len(answer.Servers) != 1 || answer.Servers[0].String() != "10.99.2.1" {
+		t.Errorf("got %+v, %v", answer, ok)
+	}
+	if answer, ok := r.For("cupcakes.example"); !ok || answer.Owner != "" || answer.Domain != "example" {
+		t.Errorf("someone else's file: %+v, %v", answer, ok)
+	}
+	if _, ok := r.For("brooklyn.test"); ok {
+		t.Error("a file for a name nobody routes")
+	}
+}

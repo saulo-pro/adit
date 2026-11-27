@@ -459,6 +459,18 @@ func (f *fakeTunnels) Down(name string) error {
 	return nil
 }
 
+func (f *fakeTunnels) SetLAN(name, mode string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	status, err := f.get(name)
+	if err != nil {
+		return err
+	}
+	status.LAN = mode
+	f.changed()
+	return nil
+}
+
 func (f *fakeTunnels) SetKillSwitch(name, mode string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()

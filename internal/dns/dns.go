@@ -202,3 +202,37 @@ func writeFile(path, content string, mode os.FileMode) error {
 		return err
 	}
 }
+
+// Answer is the resolver file macOS uses for a name, if any: the most specific domain that has one.
+type Answer struct {
+	Domain  string
+	File    string
+	Owner   string // the adit tunnel that wrote it; empty for someone else's
+	Servers []netip.Addr
+}
+
+// For finds the resolver file that answers name, reading only: for `adit route`.
+func (r *Resolvers) For(name string) (Answer, bool) {
+	labels := strings.Split(fileName(name), ".")
+	for n := range labels {
+		domain := strings.Join(labels[n:], ".")
+		path := filepath.Join(r.Dir, domain)
+		content, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		answer := Answer{Domain: domain, File: path}
+		answer.Owner, _ = r.owner(path)
+		scanner := bufio.NewScanner(strings.NewReader(string(content)))
+		for scanner.Scan() {
+			fields := strings.Fields(scanner.Text())
+			if len(fields) == 2 && fields[0] == "nameserver" {
+				if addr, err := netip.ParseAddr(fields[1]); err == nil {
+					answer.Servers = append(answer.Servers, addr)
+				}
+			}
+		}
+		return answer, true
+	}
+	return Answer{}, false
+}

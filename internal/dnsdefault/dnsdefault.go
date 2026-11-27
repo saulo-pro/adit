@@ -86,3 +86,45 @@ func errText(err error) string {
 	}
 	return err.Error()
 }
+
+// Current is the full tunnel whose servers are the default resolver now, if any: for `adit route`.
+// Reading the dynamic store needs no privilege.
+func (d *Default) Current() (tunnel string, servers []netip.Addr, err error) {
+	output, err := d.Run("list " + keyPrefix + "[^/]+/DNS\n")
+	if err != nil {
+		return "", nil, fmt.Errorf("could not read the DNS settings: %s", errText(err))
+	}
+	var found string
+	scanner := bufio.NewScanner(strings.NewReader(string(output)))
+	for scanner.Scan() {
+		if _, key, ok := strings.Cut(scanner.Text(), "= "); ok && strings.HasPrefix(key, keyPrefix) && strings.HasSuffix(key, "/DNS") {
+			found = key
+			break
+		}
+	}
+	if found == "" || strings.ContainsAny(found, " \t\"") {
+		return "", nil, nil
+	}
+	shown, err := d.Run("show " + found + "\n")
+	if err != nil {
+		return "", nil, fmt.Errorf("could not read the DNS settings: %s", errText(err))
+	}
+	inServers := false
+	scanner = bufio.NewScanner(strings.NewReader(string(shown)))
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		switch {
+		case strings.HasPrefix(line, "ServerAddresses"):
+			inServers = true
+		case line == "}":
+			inServers = false
+		case inServers:
+			if _, value, ok := strings.Cut(line, " : "); ok {
+				if addr, err := netip.ParseAddr(value); err == nil {
+					servers = append(servers, addr)
+				}
+			}
+		}
+	}
+	return strings.TrimSuffix(strings.TrimPrefix(found, keyPrefix), "/DNS"), servers, nil
+}

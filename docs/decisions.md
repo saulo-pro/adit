@@ -267,3 +267,19 @@ program that also uses pf keeps it on when adit lets go.
 - **Known limits.** A gap at boot before launchd starts aditd (Mullvad and IVPN document the same);
   another program's anchor sorting before adit's can let traffic through; tunnels of the WireGuard
   app or wg-quick are blocked like any other traffic while it is on.
+
+## 2026-11-27 — The local network beside a full tunnel; `adit route`
+
+A full tunnel lets the local network be reached by default (`lan allow`), as PIA and Proton do:
+printers, shares and AirDrop keep working, and the route trick already leaves the local network's
+routes in place. `lan block` is for networks not to be trusted. It blocks private, link-local and
+multicast IPv4 and unique local IPv6 in aditd's pf anchor, both ways, while the full tunnel is up,
+with or without the kill switch. Sending those networks into the tunnel instead is not possible:
+macOS refuses a second route for a network an interface already routes. IPv6 link-local and multicast
+always pass, since IPv6 does not work without them.
+
+`adit route ADDRESS|NAME` answers "which tunnel carries this?", which no other client does: the
+kernel's own route (`route -n get`), the tunnel behind its interface (adit's, wg-quick's, the
+WireGuard app's), and for a name, the resolver that answers it (a tunnel's resolver file, the full
+tunnel's default resolver, or the network's). It reads only, needs no root, and is open to the adit
+group.

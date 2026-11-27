@@ -40,6 +40,21 @@ func notFound(name string) error {
 type Settings struct {
 	Autostart  bool   `json:"autostart"`
 	KillSwitch string `json:"killswitch,omitempty"` // a full tunnel's: KillSwitchOff, OnDrop or Always; empty is OnDrop
+	LAN        string `json:"lan,omitempty"`        // a full tunnel's: LANAllow or LANBlock; empty is LANAllow
+}
+
+// A full tunnel lets the local network be reached beside it, or blocks it:
+const (
+	LANAllow = "allow" // printers, file shares and AirDrop keep working
+	LANBlock = "block" // for networks not to be trusted: nothing on them is reached, nor reaches the Mac
+)
+
+// LANMode is the local network setting with the default filled in.
+func (s Settings) LANMode() string {
+	if s.LAN == "" {
+		return LANAllow
+	}
+	return s.LAN
 }
 
 // A full tunnel's kill switch blocks every packet that does not go through adit's tunnels:

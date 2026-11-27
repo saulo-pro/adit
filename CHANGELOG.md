@@ -23,6 +23,12 @@ notes of its GitHub release.
   aditd restarts, which brings the tunnel back up.
 - `adit signin`, and "Sign in to this network…" in the menu while blocking: lifts the kill switch
   for 2 minutes and opens the network's sign-in page, for hotel and airport networks.
+- `sudo adit lan NAME block` blocks the local network while a full tunnel is up, for networks not to
+  be trusted; `allow`, the default, keeps printers, shares and AirDrop working.
+- `adit route ADDRESS|NAME` says which tunnel carries a destination and, for a name, which DNS
+  server looks it up: an adit tunnel's, the full tunnel's or the network's.
+- `adit list` and the menu say in one line where the Mac's traffic goes while a full tunnel is up;
+  the menu shows the full tunnel first.
 
 ### Changed
 

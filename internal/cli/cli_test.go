@@ -577,14 +577,16 @@ func TestImportSummaryOfAFullTunnel(t *testing.T) {
 	// A throwaway key made for this test; it guards nothing.
 	base := "[Interface]\nPrivateKey = cLzT3oxyUzSXHZQPIOcI2LSoG5mBzVunYbXpSonv2UU=\nAddress = 10.64.0.2/32\n%s\n[Peer]\n" +
 		"PublicKey = L4oNLijDi5zJ8gOyZv1Rj4tmLS6jVBGWWwWoN/jYCAQ=\nAllowedIPs = 0.0.0.0/0, ::/0\nEndpoint = 203.0.113.10:51820\n"
-	got := whatItChanges([]byte(fmt.Sprintf(base, "DNS = 10.64.0.1, manhattan.example\n")))
+	got := whatItChanges("manhattan", []byte(fmt.Sprintf(base, "DNS = 10.64.0.1, manhattan.example\n")))
 	want := "When up, it routes everything (0.0.0.0/0, ::/0) but the local network and adit's other tunnels\n" +
 		"and sends every name but the other tunnels' domains to 10.64.0.1\n" +
+		"Kill switch on: while it is coming up or has dropped, the internet is blocked (sudo adit killswitch manhattan always|off to change)\n" +
+		"The local network stays reachable (sudo adit lan manhattan block to block it)\n" +
 		"Its server: 203.0.113.10:51820\n"
 	if got != want {
 		t.Errorf("got:\n%s", got)
 	}
-	if got := whatItChanges([]byte(fmt.Sprintf(base, ""))); !strings.Contains(got, "it needs a DNS line to come up") {
+	if got := whatItChanges("manhattan", []byte(fmt.Sprintf(base, ""))); !strings.Contains(got, "it needs a DNS line to come up") {
 		t.Errorf("without DNS:\n%s", got)
 	}
 }

@@ -52,6 +52,7 @@ func newFirewall(t *testing.T) (*Firewall, *fakePf) {
 var rules = Rules{
 	Interfaces: []string{"utun4", "utun5"},
 	Servers:    []netip.AddrPort{netip.MustParseAddrPort("203.0.113.10:51820"), netip.MustParseAddrPort("[2001:db8::7]:51821")},
+	BlockAll:   true,
 	AllowLAN:   true,
 	Guards:     []string{"manhattan"},
 }
@@ -78,8 +79,25 @@ func TestTheRulesetPassesOnlyAditsTunnels(t *testing.T) {
 	if strings.Contains(got, "pass quick to {") || strings.Contains(got, "pass quick from {") {
 		t.Error("the local network passes both ways regardless of direction: a Mac's own private address would pass everything")
 	}
-	if strings.Contains(Ruleset(Rules{}), "pass out quick to {") {
+	if strings.Contains(Ruleset(Rules{BlockAll: true}), "pass out quick to { 10.0.0.0/8") {
 		t.Error("the local network passes without AllowLAN")
+	}
+}
+
+func TestLANBlockAloneBlocksOnlyTheLocalNetwork(t *testing.T) {
+	got := Ruleset(Rules{Interfaces: []string{"utun5"}})
+	for _, want := range []string{
+		"pass quick on { utun5 } no state\n",
+		"pass out quick to { fe80::/10 ff00::/8 } no state\n",
+		"block return out quick to { 10.0.0.0/8 ",
+		"block drop in quick from { 10.0.0.0/8 ",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("no %q in:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "block return out quick all") || strings.Contains(got, "port 53") {
+		t.Errorf("blocks more than the local network:\n%s", got)
 	}
 }
 

@@ -54,3 +54,19 @@ func TestClearAllRemovesOnlyAditsKeys(t *testing.T) {
 		t.Errorf("scripts %q", f.scripts)
 	}
 }
+
+func TestCurrentReadsTheKey(t *testing.T) {
+	answers := map[string]string{
+		"list": "  subKey [0] = State:/Network/Service/adit-manhattan/DNS\n",
+		"show": "<dictionary> {\n  ServerAddresses : <array> {\n    0 : 10.64.0.1\n    1 : 2001:db8::53\n  }\n  SupplementalMatchDomains : <array> {\n    0 : \n  }\n}\n",
+	}
+	d := &Default{Run: func(script string) ([]byte, error) { return []byte(answers[strings.Fields(script)[0]]), nil }}
+	tunnel, servers, err := d.Current()
+	if err != nil || tunnel != "manhattan" || len(servers) != 2 || servers[1].String() != "2001:db8::53" {
+		t.Errorf("got %q %v %v", tunnel, servers, err)
+	}
+	d = &Default{Run: func(string) ([]byte, error) { return []byte("  No such key\n"), nil }}
+	if tunnel, _, err := d.Current(); tunnel != "" || err != nil {
+		t.Errorf("with no key: %q %v", tunnel, err)
+	}
+}
