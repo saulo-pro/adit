@@ -30,11 +30,17 @@ Usage:
   adit up NAME                     bring a tunnel up
   adit down NAME                   take a tunnel down
   adit autostart NAME on|off       whether it comes up when the Mac starts
+  adit signin                      lift the kill switch for 2 minutes to sign in
+                                   to a hotel's or airport's network
   sudo adit import FILE [--name NAME]
                                    add a tunnel from a WireGuard .conf file
   sudo adit export NAME --output FILE
                                    write a tunnel's file, readable only by you
   sudo adit remove NAME            delete a tunnel
+  sudo adit killswitch NAME on-drop|always|off
+                                   when a full tunnel blocks the internet: while
+                                   it is not up (on-drop, the default), also while
+                                   it is down by choice (always), or never
   sudo adit install [--aditd PATH] install aditd, start it now and at every boot,
                                    and let you use adit without a password
   sudo adit uninstall [--keep-tunnels] [--yes]
@@ -66,6 +72,8 @@ type CLI struct {
 	// chown hands an exported file to the person who ran sudo; euid says whether adit runs as root.
 	chown func(file *os.File, uid, gid int) error
 	euid  func() int
+	// openURL opens a page in the person's browser; /usr/bin/open when nil.
+	openURL func(url string) error
 
 	// The system around adit, for install and friends; fakes in tests.
 	installer  installer
@@ -85,19 +93,21 @@ type CLI struct {
 type command func(c *CLI, ctx context.Context, out *output, args []string) error
 
 var commands = map[string]command{
-	"list":      (*CLI).list,
-	"status":    (*CLI).status,
-	"up":        (*CLI).up,
-	"down":      (*CLI).down,
-	"autostart": (*CLI).autostart,
-	"import":    (*CLI).importFile,
-	"export":    (*CLI).export,
-	"remove":    (*CLI).remove,
-	"version":   (*CLI).version,
-	"install":   (*CLI).install,
-	"uninstall": (*CLI).uninstall,
-	"allow":     (*CLI).allow,
-	"disallow":  (*CLI).disallow,
+	"list":       (*CLI).list,
+	"status":     (*CLI).status,
+	"up":         (*CLI).up,
+	"down":       (*CLI).down,
+	"autostart":  (*CLI).autostart,
+	"killswitch": (*CLI).killswitch,
+	"signin":     (*CLI).signin,
+	"import":     (*CLI).importFile,
+	"export":     (*CLI).export,
+	"remove":     (*CLI).remove,
+	"version":    (*CLI).version,
+	"install":    (*CLI).install,
+	"uninstall":  (*CLI).uninstall,
+	"allow":      (*CLI).allow,
+	"disallow":   (*CLI).disallow,
 }
 
 // Run runs one command and returns its exit status.

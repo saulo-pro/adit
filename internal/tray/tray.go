@@ -21,6 +21,7 @@ const (
 	KindDetail              // a line under a tunnel: a failure or a note
 	KindOther               // another program's tunnel, greyed out
 	KindMessage             // a sentence instead of tunnels, such as aditd not running
+	KindSignIn              // lifts the kill switch for a moment, to sign in to a captive network
 	KindSeparator
 )
 
@@ -38,6 +39,15 @@ const maxDetail = 70
 // Rows lays out the menu. failures are the sentences from clicks that failed, by tunnel.
 func Rows(tunnels, others []api.Tunnel, failures map[string]string, now time.Time) []Row {
 	var rows []Row
+	for _, t := range tunnels {
+		if t.Blocking {
+			rows = append(rows,
+				Row{Kind: KindMessage, Title: "The internet is blocked until " + t.Name + " is up", Tooltip: "Kill switch: nothing leaves the Mac around " + t.Name},
+				Row{Kind: KindSignIn, Name: t.Name, Title: "Sign in to this network…", Tooltip: "Lifts the kill switch for 2 minutes and opens the network's sign-in page, as in a hotel or an airport"},
+				Row{Kind: KindSeparator})
+			break
+		}
+	}
 	if len(tunnels) == 0 {
 		rows = append(rows, Row{Kind: KindMessage, Title: "No tunnels yet: add one with sudo adit import FILE"})
 	}

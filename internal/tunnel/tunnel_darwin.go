@@ -30,9 +30,10 @@ type Tunnel struct {
 // with /sbin/ifconfig and /sbin/route and arguments built only from parsed addresses. Closing the
 // device removes the interface, and its routes with it.
 //
-// beforeRoutes, if not nil, runs once the endpoints are resolved and before any route goes in: a
-// full tunnel's routes would otherwise take its own handshake, and another tunnel's.
-func Start(ctx context.Context, c *conf.Config, beforeRoutes func(endpoints []netip.Addr) error, log *slog.Logger) (*Tunnel, error) {
+// beforeRoutes, if not nil, runs once the endpoints are resolved and before the device sends
+// anything or any route goes in: a full tunnel's routes would otherwise take its own handshake, and
+// another tunnel's, and a kill switch must let them through first.
+func Start(ctx context.Context, c *conf.Config, beforeRoutes func(endpoints []netip.AddrPort) error, log *slog.Logger) (*Tunnel, error) {
 	endpoints, err := resolveEndpoints(ctx, net.DefaultResolver, c.Peers)
 	if err != nil {
 		return nil, err
@@ -64,13 +65,13 @@ func Start(ctx context.Context, c *conf.Config, beforeRoutes func(endpoints []ne
 		return nil, fmt.Errorf("WireGuard refused the configuration: %w", err)
 	}
 	if beforeRoutes != nil {
-		var addrs []netip.Addr
+		var valid []netip.AddrPort
 		for _, endpoint := range endpoints {
 			if endpoint.IsValid() {
-				addrs = append(addrs, endpoint.Addr())
+				valid = append(valid, endpoint)
 			}
 		}
-		if err := beforeRoutes(addrs); err != nil {
+		if err := beforeRoutes(valid); err != nil {
 			t.Close()
 			return nil, err
 		}

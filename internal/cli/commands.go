@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -100,6 +101,53 @@ func (c *CLI) down(ctx context.Context, out *output, args []string) error {
 		return err
 	}
 	c.print(out, c.jsonTunnel(*resp.Tunnel), fmt.Sprintf("%s is down.\n", resp.Tunnel.Name))
+	return nil
+}
+
+func (c *CLI) killswitch(ctx context.Context, out *output, args []string) error {
+	positional, err := parse(out, newFlags("killswitch"), args, 2, 2, "NAME on-drop|always|off")
+	if err != nil {
+		return err
+	}
+	mode := positional[1]
+	if mode != "on-drop" && mode != "always" && mode != "off" {
+		return usageError("usage: sudo adit killswitch NAME on-drop|always|off")
+	}
+	resp, err := c.Client.Do(ctx, api.Request{Command: api.CommandKillSwitch, Name: positional[0], Mode: mode})
+	if err != nil {
+		return err
+	}
+	name := resp.Tunnel.Name
+	words := map[string]string{
+		"on-drop": fmt.Sprintf("While %s is coming up or has dropped, the internet is blocked.\n", name),
+		"always":  fmt.Sprintf("Whenever %s is not up, even when taken down, the internet is blocked.\n", name),
+		"off":     fmt.Sprintf("If %s drops, traffic goes out directly.\n", name),
+	}[mode]
+	c.print(out, c.jsonTunnel(*resp.Tunnel), words)
+	return nil
+}
+
+// signinPage is a page macOS itself uses to find a network's sign-in page: a captive network sends
+// the browser to its own instead.
+const signinPage = "http://captive.apple.com/"
+
+func (c *CLI) signin(ctx context.Context, out *output, args []string) error {
+	if _, err := parse(out, newFlags("signin"), args, 0, 0, ""); err != nil {
+		return err
+	}
+	resp, err := c.Client.Do(ctx, api.Request{Command: api.CommandSignIn})
+	if err != nil {
+		return err
+	}
+	open := c.openURL
+	if open == nil {
+		open = func(url string) error { return exec.Command("/usr/bin/open", url).Run() }
+	}
+	words := fmt.Sprintf("The kill switch is lifted until %s: sign in to the network in your browser.\n", resp.Until.Local().Format("15:04:05"))
+	if err := open(signinPage); err != nil {
+		words += fmt.Sprintf("Open %s in your browser to reach the sign-in page.\n", signinPage)
+	}
+	c.print(out, map[string]any{"until": resp.Until}, words)
 	return nil
 }
 
@@ -304,6 +352,8 @@ type jsonTunnel struct {
 	Name                string     `json:"name"`
 	State               string     `json:"state"`
 	Autostart           bool       `json:"autostart"`
+	KillSwitch          *string    `json:"killswitch"` // a full tunnel's; null for a split tunnel
+	Blocking            bool       `json:"blocking"`   // its kill switch blocks the internet now
 	Interface           *string    `json:"interface"`
 	LastHandshake       *time.Time `json:"last_handshake"`
 	HandshakeAgeSeconds *int64     `json:"handshake_age_seconds"`
@@ -325,6 +375,10 @@ func (c *CLI) jsonTunnels(tunnels []api.Tunnel) []jsonTunnel {
 func (c *CLI) jsonTunnel(t api.Tunnel) jsonTunnel {
 	j := jsonTunnel{Name: t.Name, State: t.State, Autostart: t.Autostart, LastHandshake: t.LastHandshake,
 		ReceivedBytes: t.ReceivedBytes, SentBytes: t.SentBytes}
+	if t.KillSwitch != "" {
+		j.KillSwitch = &t.KillSwitch
+	}
+	j.Blocking = t.Blocking
 	j.Notes = t.Notes
 	if j.Notes == nil {
 		j.Notes = []string{}
@@ -387,6 +441,9 @@ func (c *CLI) details(t api.Tunnel) string {
 	fmt.Fprintf(w, "  sent\t%s\n", humanBytes(t.SentBytes))
 	if !t.ReadOnly {
 		fmt.Fprintf(w, "  autostart\t%s\n", onOff(t.Autostart))
+	}
+	if t.KillSwitch != "" {
+		fmt.Fprintf(w, "  kill switch\t%s\n", t.KillSwitch)
 	}
 	w.Flush()
 	if t.State == "idle" {

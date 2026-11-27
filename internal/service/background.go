@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"slices"
 	"sync"
 	"time"
 
@@ -40,12 +41,29 @@ func (m *Manager) Autostart(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	m.mu.Lock()
+	resume := m.resume
+	m.resume = nil
+	m.mu.Unlock()
 	for _, t := range tunnels {
-		if t.Settings.Autostart {
+		// A full tunnel whose kill switch was on when the last aditd stopped comes back up too: its
+		// kill switch is still blocking, and the person never took it down.
+		if t.Settings.Autostart || guardedBefore(t, resume) {
 			m.keepTrying(ctx, t)
 		}
 	}
+	// With nothing left to guard, an earlier aditd's kill switch lets go now.
+	m.mu.Lock()
+	m.reapply()
+	m.mu.Unlock()
 	return nil
+}
+
+// guardedBefore says whether t is a full tunnel, with its kill switch on, that an earlier aditd had
+// up or coming up.
+func guardedBefore(t *store.Tunnel, resume []string) bool {
+	full4, _ := covers(t.Config)
+	return full4 && t.Settings.KillSwitchMode() != store.KillSwitchOff && slices.Contains(resume, t.Name)
 }
 
 func (m *Manager) keepTrying(ctx context.Context, t *store.Tunnel) {
@@ -106,7 +124,7 @@ func (m *Manager) NetworkChanged(ctx context.Context) {
 func (m *Manager) followBypass() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.reapplyBypass()
+	m.reapply()
 }
 
 // ReresolveStale looks endpoint names up again for tunnels with no recent handshake: the server's

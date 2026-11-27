@@ -11,6 +11,7 @@ import (
 	"image/color"
 	"image/png"
 	"os"
+	"os/exec"
 	"sync"
 	"time"
 
@@ -98,6 +99,17 @@ func (a *app) render() {
 		case tray.KindTunnel:
 			item := systray.AddMenuItemCheckbox(row.Title, row.Tooltip, row.Checked)
 			go a.clicks(ctx, item, row.Name, row.Checked)
+		case tray.KindSignIn:
+			item := systray.AddMenuItem(row.Title, row.Tooltip)
+			go func() {
+				select {
+				case <-ctx.Done():
+				case _, clicked := <-item.ClickedCh:
+					if clicked {
+						go a.signIn(row.Name)
+					}
+				}
+			}()
 		default:
 			systray.AddMenuItem(row.Title, row.Tooltip).Disable()
 		}
@@ -139,6 +151,29 @@ func (a *app) toggle(name string, on bool) {
 	a.mu.Lock()
 	if err != nil {
 		a.failures[name] = err.Error()
+	} else {
+		delete(a.failures, name)
+	}
+	a.mu.Unlock()
+	a.render()
+}
+
+// signInPage is a page macOS itself uses to find a network's sign-in page: a captive network sends
+// the browser to its own instead.
+const signInPage = "http://captive.apple.com/"
+
+// signIn lifts the kill switch for a moment and opens the network's sign-in page. A failure shows
+// under the full tunnel whose kill switch blocks.
+func (a *app) signIn(name string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_, err := a.client.Do(ctx, api.Request{Command: api.CommandSignIn})
+	if err == nil {
+		err = exec.Command("/usr/bin/open", signInPage).Run()
+	}
+	a.mu.Lock()
+	if err != nil {
+		a.failures[name] = "could not lift the kill switch to sign in: " + err.Error()
 	} else {
 		delete(a.failures, name)
 	}

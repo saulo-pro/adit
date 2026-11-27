@@ -16,6 +16,13 @@ notes of its GitHub release.
   another program's full tunnel is up.
 - A full tunnel that carries only IPv4 blocks IPv6 while it is up, so it cannot leave around the
   tunnel.
+- A kill switch for full tunnels, on by default: while the full tunnel is coming up or has dropped,
+  or aditd has died with it up, nothing leaves the Mac but through adit's tunnels (the local network
+  still works). `sudo adit killswitch NAME always` blocks also while it is down by choice and from
+  the Mac's start; `off` lets traffic out directly, as the WireGuard app does. It stays on while
+  aditd restarts, which brings the tunnel back up.
+- `adit signin`, and "Sign in to this network…" in the menu while blocking: lifts the kill switch
+  for 2 minutes and opens the network's sign-in page, for hotel and airport networks.
 
 ### Changed
 

@@ -588,3 +588,34 @@ func TestImportSummaryOfAFullTunnel(t *testing.T) {
 		t.Errorf("without DNS:\n%s", got)
 	}
 }
+
+func TestKillSwitchSaysWhatItDoes(t *testing.T) {
+	run := newRun(t, func(req api.Request) api.Response {
+		return api.Response{OK: true, Tunnel: &api.Tunnel{Name: req.Name, State: "down", KillSwitch: req.Mode}}
+	})
+	if code := run.cli("killswitch", "manhattan", "always"); code != 0 {
+		t.Fatalf("exit %d: %s", code, run.stderr)
+	}
+	if want := "Whenever manhattan is not up, even when taken down, the internet is blocked.\n"; run.stdout.String() != want {
+		t.Errorf("got %q", run.stdout)
+	}
+	if req := run.requests[0]; req.Command != api.CommandKillSwitch || req.Mode != "always" {
+		t.Errorf("request %+v", req)
+	}
+	if code := run.cli("killswitch", "manhattan", "sometimes"); code != 2 {
+		t.Errorf("a made-up mode: exit %d", code)
+	}
+}
+
+func TestSignInOpensTheSignInPage(t *testing.T) {
+	until := time.Date(2026, 11, 27, 18, 2, 0, 0, time.UTC)
+	run := newRun(t, func(req api.Request) api.Response { return api.Response{OK: true, Until: &until} })
+	var opened string
+	run.c.openURL = func(url string) error { opened = url; return nil }
+	if code := run.cli("signin"); code != 0 {
+		t.Fatalf("exit %d: %s", code, run.stderr)
+	}
+	if opened != "http://captive.apple.com/" || !strings.Contains(run.stdout.String(), "The kill switch is lifted until "+until.Local().Format("15:04:05")) {
+		t.Errorf("opened %q, said %q", opened, run.stdout)
+	}
+}

@@ -68,15 +68,15 @@ func routes(c *conf.Config) []netip.Prefix {
 	return routes
 }
 
-// Endpoints are the addresses a running tunnel's peers are reached at, as its device reports them.
-func (s Status) Endpoints() []netip.Addr {
-	var addrs []netip.Addr
+// Endpoints are where a running tunnel's peers are reached, as its device reports them.
+func (s Status) Endpoints() []netip.AddrPort {
+	var endpoints []netip.AddrPort
 	for _, peer := range s.Peers {
 		if peer.Endpoint.IsValid() {
-			addrs = append(addrs, peer.Endpoint.Addr().Unmap())
+			endpoints = append(endpoints, netip.AddrPortFrom(peer.Endpoint.Addr().Unmap(), peer.Endpoint.Port()))
 		}
 	}
-	return addrs
+	return endpoints
 }
 
 // resolveEndpoints turns each peer's endpoint into an address, since the device takes only

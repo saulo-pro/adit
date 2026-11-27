@@ -14,7 +14,7 @@ import (
 // Tunnel is not implemented here yet: adit runs tunnels on macOS first.
 type Tunnel struct{}
 
-func Start(ctx context.Context, c *conf.Config, beforeRoutes func(endpoints []netip.Addr) error, log *slog.Logger) (*Tunnel, error) {
+func Start(ctx context.Context, c *conf.Config, beforeRoutes func(endpoints []netip.AddrPort) error, log *slog.Logger) (*Tunnel, error) {
 	return nil, errors.New("adit runs tunnels only on macOS for now")
 }
 

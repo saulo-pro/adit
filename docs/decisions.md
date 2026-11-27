@@ -240,8 +240,30 @@ machine, before building:
   (`0.0.0.0/1` alone, `10.0.0.0/7`, `::/0` without IPv4) is refused, saying how to write a full
   tunnel.
 
-For now a full tunnel fails open: if it drops or aditd dies, traffic goes out directly, as with the
-WireGuard app. A kill switch comes next, as a pf anchor of aditd's: the experiments showed that
-anchors outlive the process that loaded them, that only root's packets can be let through to the
-tunnels' servers, that starting to block cuts connections already open, and that another program's
-anchor evaluated earlier can let traffic through adit's block.
+## 2026-11-27 — The kill switch is a pf anchor, on by default
+
+A full tunnel's kill switch blocks every packet that does not go through one of adit's tunnels. It
+is a pf anchor of aditd's, `com.apple/000.adit`: macOS's own `pf.conf` loads anchors under
+`com.apple/`, so adit never edits it, and pf reads them in name order, so `000` comes before Apple's
+(`200.AirDrop`, `250.ApplicationFirewall`). pf is turned on with a reference (`pfctl -E`), so a
+program that also uses pf keeps it on when adit lets go.
+
+- **Modes**, as consumer VPNs name them: `on-drop` (the default) blocks while the full tunnel is
+  coming up, after it drops, and when aditd dies with it up; `always` also while it is down by
+  choice and from the Mac's start; `off` never, as the WireGuard app. Setting it is root's, like
+  import: it decides when the Mac is protected.
+- **What passes**: loopback; adit's tunnel interfaces; UDP to each tunnel's server, from root only
+  (aditd), so no other program can slip traffic out to that address; DNS from root, so aditd can look
+  a server's name up; DHCP; and the local network (private, link-local and multicast ranges). DNS to
+  anywhere else is refused. Passes keep no state, so connections already open through a tunnel or on
+  the local network keep going when the kill switch comes on; others are cut, since pf is usually
+  off and has no state for them.
+- **It outlives aditd.** The anchor stays in the kernel when aditd dies or stops, so an upgrade or a
+  crash never opens the Mac. Its state file says which full tunnels it guarded; the next aditd
+  brings them back up, or lets go if none is left. `adit uninstall` removes it.
+- **Captive networks.** A hotel's sign-in page cannot be reached while blocking, and the tunnel
+  cannot connect before signing in. `adit signin`, and "Sign in to this network…" in the menu, lift
+  the kill switch for 2 minutes and open `captive.apple.com`, which such networks redirect.
+- **Known limits.** A gap at boot before launchd starts aditd (Mullvad and IVPN document the same);
+  another program's anchor sorting before adit's can let traffic through; tunnels of the WireGuard
+  app or wg-quick are blocked like any other traffic while it is on.

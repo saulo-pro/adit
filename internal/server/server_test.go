@@ -459,6 +459,25 @@ func (f *fakeTunnels) Down(name string) error {
 	return nil
 }
 
+func (f *fakeTunnels) SetKillSwitch(name, mode string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	status, err := f.get(name)
+	if err != nil {
+		return err
+	}
+	status.KillSwitch = mode
+	f.changed()
+	return nil
+}
+
+// signInUntil is when the fake's kill switch comes back.
+var signInUntil = time.Date(2026, 11, 27, 18, 2, 0, 0, time.UTC)
+
+func (f *fakeTunnels) SignIn() (time.Time, error) {
+	return signInUntil, nil
+}
+
 func (f *fakeTunnels) SetAutostart(name string, on bool) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()

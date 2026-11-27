@@ -21,6 +21,7 @@ import (
 
 	"github.com/saulo-pro/adit/internal/api"
 	"github.com/saulo-pro/adit/internal/dns"
+	"github.com/saulo-pro/adit/internal/firewall"
 )
 
 const (
@@ -193,6 +194,15 @@ func (i *Installer) Uninstall(keepTunnels bool, uid int, out io.Writer) error {
 	logs, _ := filepath.Glob(i.path(Log) + "*")
 	for _, log := range logs {
 		remove(strings.TrimPrefix(log, i.Root), "the log")
+	}
+	// A stopped aditd leaves its kill switch blocking, on purpose: uninstalling turns it off.
+	pf := &firewall.Firewall{Anchor: firewall.DefaultAnchor, StateFile: i.path(firewall.DefaultStateFile),
+		Run: func(_ string, args ...string) ([]byte, error) { return i.Run("/sbin/pfctl", args...) }}
+	_, statErr := os.Stat(pf.StateFile)
+	if err := pf.Release(); err != nil {
+		errs = append(errs, err)
+	} else if statErr == nil {
+		fmt.Fprintln(out, "Turned the kill switch off.")
 	}
 	remove(RunDir, "the socket's folder")
 	if err := (&dns.Resolvers{Dir: i.path(dns.DefaultDir)}).ClearAll(); err != nil {

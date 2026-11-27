@@ -38,7 +38,23 @@ func notFound(name string) error {
 
 // Settings are adit's own, kept beside the WireGuard file.
 type Settings struct {
-	Autostart bool `json:"autostart"`
+	Autostart  bool   `json:"autostart"`
+	KillSwitch string `json:"killswitch,omitempty"` // a full tunnel's: KillSwitchOff, OnDrop or Always; empty is OnDrop
+}
+
+// A full tunnel's kill switch blocks every packet that does not go through adit's tunnels:
+const (
+	KillSwitchOff    = "off"     // never: if it drops, traffic goes out directly
+	KillSwitchOnDrop = "on-drop" // while it comes up, after it drops, or when aditd dies with it up
+	KillSwitchAlways = "always"  // also while it is down by choice, and from the Mac's start
+)
+
+// KillSwitchMode is the kill switch setting with the default filled in.
+func (s Settings) KillSwitchMode() string {
+	if s.KillSwitch == "" {
+		return KillSwitchOnDrop
+	}
+	return s.KillSwitch
 }
 
 // Tunnel is a stored tunnel. Its file's text stays on disk; File reads it for export.

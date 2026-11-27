@@ -18,6 +18,7 @@ import (
 	"github.com/saulo-pro/adit/internal/bypass"
 	"github.com/saulo-pro/adit/internal/conf"
 	"github.com/saulo-pro/adit/internal/dns"
+	"github.com/saulo-pro/adit/internal/firewall"
 	"github.com/saulo-pro/adit/internal/others"
 	"github.com/saulo-pro/adit/internal/routes"
 	"github.com/saulo-pro/adit/internal/store"
@@ -122,7 +123,7 @@ func TestUpTwiceStartsOneDevice(t *testing.T) {
 
 func TestFailureToStartNamesTheTunnel(t *testing.T) {
 	m, _ := newTestManager(t)
-	m.start = func(context.Context, *conf.Config, func([]netip.Addr) error) (device, error) {
+	m.start = func(context.Context, *conf.Config, func([]netip.AddrPort) error) (device, error) {
 		return nil, errors.New("the Endpoint vpn.example.com does not resolve; check the network or the Endpoint line")
 	}
 	mustImport(t, m, "work")
@@ -216,7 +217,7 @@ func newTestManager(t *testing.T) (*Manager, *fakeDevices) {
 		t.Fatal(err)
 	}
 	devices := &fakeDevices{}
-	start := func(_ context.Context, c *conf.Config, beforeRoutes func([]netip.Addr) error) (device, error) {
+	start := func(_ context.Context, c *conf.Config, beforeRoutes func([]netip.AddrPort) error) (device, error) {
 		dev := &fakeDevice{status: tunnel.Status{Interface: "utun2" + string(rune('0'+len(*devices)))}}
 		for _, peer := range c.Peers {
 			if addr, err := netip.ParseAddr(peer.Endpoint.Host); err == nil {
@@ -234,6 +235,8 @@ func newTestManager(t *testing.T) (*Manager, *fakeDevices) {
 		now:       func() time.Time { return now },
 		resolvers: &dns.Resolvers{Dir: filepath.Join(t.TempDir(), "resolver")},
 		bypass:    &fakeBypass{},
+		firewall:  &fakeFirewall{},
+		signIn:    2 * time.Minute,
 		dnsAll:    &fakeDefaultDNS{set: map[string][]netip.Addr{}},
 		routes:    func() ([]routes.Route, error) { return nil, nil },
 	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
@@ -256,6 +259,32 @@ func (f *fakeBypass) last() bypass.Plan {
 		return bypass.Plan{}
 	}
 	return f.plans[len(f.plans)-1]
+}
+
+// fakeFirewall is pf's anchor: blocking with some rules, or not.
+type fakeFirewall struct {
+	rules    *firewall.Rules
+	previous []string // guards an earlier aditd left
+	loads    int
+}
+
+func (f *fakeFirewall) Block(r firewall.Rules) error {
+	f.rules = &r
+	f.loads++
+	return nil
+}
+
+func (f *fakeFirewall) Release() error {
+	f.rules = nil
+	f.previous = nil
+	return nil
+}
+
+func (f *fakeFirewall) Guards() ([]string, error) {
+	if f.rules != nil {
+		return f.rules.Guards, nil
+	}
+	return f.previous, nil
 }
 
 // fakeDefaultDNS keeps which tunnel's servers are the default.
@@ -301,7 +330,7 @@ func assertState(t *testing.T, m *Manager, name string, want State) {
 func TestStatusAnswersWhileATunnelComesUp(t *testing.T) {
 	m, _ := newTestManager(t)
 	started, release := make(chan struct{}), make(chan struct{})
-	m.start = func(context.Context, *conf.Config, func([]netip.Addr) error) (device, error) {
+	m.start = func(context.Context, *conf.Config, func([]netip.AddrPort) error) (device, error) {
 		close(started)
 		<-release
 		return &fakeDevice{status: tunnel.Status{Interface: "utun30"}}, nil
@@ -329,7 +358,7 @@ func TestDownStopsATunnelComingUp(t *testing.T) {
 	m, _ := newTestManager(t)
 	started, release := make(chan struct{}), make(chan struct{})
 	dev := &fakeDevice{}
-	m.start = func(ctx context.Context, _ *conf.Config, _ func([]netip.Addr) error) (device, error) {
+	m.start = func(ctx context.Context, _ *conf.Config, _ func([]netip.AddrPort) error) (device, error) {
 		close(started)
 		<-release
 		return dev, nil
@@ -437,7 +466,7 @@ func TestOverlappingTunnelsAreRefused(t *testing.T) {
 func TestATunnelComingUpAlreadyHoldsItsNetworks(t *testing.T) {
 	m, _ := newTestManager(t)
 	started, release := make(chan struct{}), make(chan struct{})
-	m.start = func(context.Context, *conf.Config, func([]netip.Addr) error) (device, error) {
+	m.start = func(context.Context, *conf.Config, func([]netip.AddrPort) error) (device, error) {
 		close(started)
 		<-release
 		return &fakeDevice{}, nil
@@ -609,7 +638,7 @@ func TestAutostartKeepsTryingUntilTheTunnelComesUp(t *testing.T) {
 	failures := 2
 	start := m.start
 	var mu sync.Mutex
-	m.start = func(ctx context.Context, c *conf.Config, beforeRoutes func([]netip.Addr) error) (device, error) {
+	m.start = func(ctx context.Context, c *conf.Config, beforeRoutes func([]netip.AddrPort) error) (device, error) {
 		mu.Lock()
 		defer mu.Unlock()
 		if failures > 0 {
@@ -637,7 +666,7 @@ func TestAutostartKeepsTryingUntilTheTunnelComesUp(t *testing.T) {
 func TestStatusExplainsAnAutostartStillTrying(t *testing.T) {
 	m, _ := newTestManager(t)
 	m.retryWait = time.Hour
-	m.start = func(context.Context, *conf.Config, func([]netip.Addr) error) (device, error) {
+	m.start = func(context.Context, *conf.Config, func([]netip.AddrPort) error) (device, error) {
 		return nil, errors.New("the Endpoint vpn.example.com does not resolve; check the network or the Endpoint line")
 	}
 	importText(t, m, "work", fileWith("10.99.1.0/24", ""))
@@ -660,7 +689,7 @@ func TestStatusExplainsAnAutostartStillTrying(t *testing.T) {
 func TestTunnelsFollowTheNetwork(t *testing.T) {
 	m, _ := newTestManager(t)
 	var followers []*followingDevice
-	m.start = func(context.Context, *conf.Config, func([]netip.Addr) error) (device, error) {
+	m.start = func(context.Context, *conf.Config, func([]netip.AddrPort) error) (device, error) {
 		d := &followingDevice{fakeDevice: fakeDevice{status: tunnel.Status{Interface: "utun30"}}}
 		followers = append(followers, d)
 		return d, nil
@@ -908,8 +937,8 @@ func TestWideTunnelsThatAreNotFullAreRefused(t *testing.T) {
 
 func TestAFailedStartTakesTheBypassAway(t *testing.T) {
 	m, _ := newTestManager(t)
-	m.start = func(_ context.Context, _ *conf.Config, beforeRoutes func([]netip.Addr) error) (device, error) {
-		if err := beforeRoutes(addrs("203.0.113.10")); err != nil {
+	m.start = func(_ context.Context, _ *conf.Config, beforeRoutes func([]netip.AddrPort) error) (device, error) {
+		if err := beforeRoutes([]netip.AddrPort{netip.MustParseAddrPort("203.0.113.10:51820")}); err != nil {
 			return nil, err
 		}
 		return nil, errors.New("WireGuard did not start on utun9")
@@ -987,5 +1016,214 @@ func TestRecheckNotesARouteThatAppearedLater(t *testing.T) {
 	m.Recheck()
 	if status, _ := m.Status("manhattan"); len(status.Notes) != 0 {
 		t.Errorf("the note stayed: %q", status.Notes)
+	}
+}
+
+func TestTheKillSwitchGuardsAFullTunnelUntilItIsTakenDown(t *testing.T) {
+	m, _ := newTestManager(t)
+	fw := m.firewall.(*fakeFirewall)
+	var atRoutes *firewall.Rules
+	start := m.start
+	m.start = func(ctx context.Context, c *conf.Config, beforeRoutes func([]netip.AddrPort) error) (device, error) {
+		return start(ctx, c, func(endpoints []netip.AddrPort) error {
+			err := beforeRoutes(endpoints)
+			if fw.rules != nil {
+				copied := *fw.rules
+				atRoutes = &copied
+			}
+			return err
+		})
+	}
+	importText(t, m, "manhattan", fullFile("0.0.0.0/0", "10.64.0.1"))
+	importText(t, m, "diner", splitFile("10.99.1.0/24", ""))
+	if err := m.Up(context.Background(), "diner"); err != nil {
+		t.Fatal(err)
+	}
+	if fw.rules != nil {
+		t.Fatal("a split tunnel alone turned the kill switch on")
+	}
+	if err := m.Up(context.Background(), "manhattan"); err != nil {
+		t.Fatal(err)
+	}
+	if atRoutes == nil || !slices.Contains(atRoutes.Servers, netip.MustParseAddrPort("203.0.113.10:51820")) {
+		t.Errorf("before its routes, the kill switch was %+v: it must be on, letting the server through", atRoutes)
+	}
+	want := firewall.Rules{
+		Interfaces: []string{"utun20", "utun21"},
+		Servers:    []netip.AddrPort{netip.MustParseAddrPort("198.51.100.7:51820"), netip.MustParseAddrPort("203.0.113.10:51820")},
+		AllowLAN:   true,
+		Guards:     []string{"manhattan"},
+	}
+	slices.SortFunc(fw.rules.Servers, func(a, b netip.AddrPort) int { return a.Compare(b) })
+	if !reflect.DeepEqual(*fw.rules, want) {
+		t.Errorf("rules %+v, want %+v", *fw.rules, want)
+	}
+	status, _ := m.Status("manhattan")
+	if status.KillSwitch != "on-drop" || status.Blocking || !strings.Contains(strings.Join(status.Notes, " "), "if it drops, the internet is blocked") {
+		t.Errorf("status %+v", status)
+	}
+
+	if err := m.Down("manhattan"); err != nil {
+		t.Fatal(err)
+	}
+	if fw.rules != nil {
+		t.Error("taking it down did not turn the kill switch off")
+	}
+}
+
+func TestAlwaysBlocksWhileTheFullTunnelIsDown(t *testing.T) {
+	m, _ := newTestManager(t)
+	fw := m.firewall.(*fakeFirewall)
+	importText(t, m, "manhattan", fullFile("0.0.0.0/0", "10.64.0.1"))
+	if err := m.SetKillSwitch("manhattan", "always"); err != nil {
+		t.Fatal(err)
+	}
+	if fw.rules == nil || len(fw.rules.Guards) != 0 {
+		t.Fatalf("always, down: rules %+v (blocking, with nothing to bring back up)", fw.rules)
+	}
+	status, _ := m.Status("manhattan")
+	if !status.Blocking || !strings.Contains(strings.Join(status.Notes, " "), "adit killswitch manhattan off lets it through") {
+		t.Errorf("status %+v", status)
+	}
+	if err := m.SetKillSwitch("manhattan", "off"); err != nil {
+		t.Fatal(err)
+	}
+	if fw.rules != nil {
+		t.Error("off did not lift it")
+	}
+}
+
+func TestRemovingTheTunnelLiftsItsKillSwitch(t *testing.T) {
+	m, _ := newTestManager(t)
+	importText(t, m, "manhattan", fullFile("0.0.0.0/0", "10.64.0.1"))
+	m.SetKillSwitch("manhattan", "always")
+	if err := m.Remove("manhattan"); err != nil {
+		t.Fatal(err)
+	}
+	if m.firewall.(*fakeFirewall).rules != nil {
+		t.Error("the kill switch outlived its tunnel")
+	}
+}
+
+func TestOffNeverBlocks(t *testing.T) {
+	m, _ := newTestManager(t)
+	importText(t, m, "manhattan", fullFile("0.0.0.0/0", "10.64.0.1"))
+	m.SetKillSwitch("manhattan", "off")
+	if err := m.Up(context.Background(), "manhattan"); err != nil {
+		t.Fatal(err)
+	}
+	if m.firewall.(*fakeFirewall).rules != nil {
+		t.Error("blocking with the kill switch off")
+	}
+	status, _ := m.Status("manhattan")
+	if !strings.Contains(strings.Join(status.Notes, " "), "traffic goes out directly (kill switch off)") {
+		t.Errorf("notes %v", status.Notes)
+	}
+}
+
+func TestTheKillSwitchIsForFullTunnels(t *testing.T) {
+	m, _ := newTestManager(t)
+	mustImport(t, m, "diner")
+	err := m.SetKillSwitch("diner", "always")
+	if err == nil || !strings.Contains(err.Error(), "the kill switch is for a full tunnel") {
+		t.Errorf("got %v", err)
+	}
+	importText(t, m, "manhattan", fullFile("0.0.0.0/0", "10.64.0.1"))
+	if err := m.SetKillSwitch("manhattan", "sometimes"); err == nil {
+		t.Error("a made-up mode was taken")
+	}
+}
+
+func TestANewAditdBringsBackWhatTheKillSwitchGuarded(t *testing.T) {
+	m, _ := newTestManager(t)
+	fw := m.firewall.(*fakeFirewall)
+	importText(t, m, "manhattan", fullFile("0.0.0.0/0", "10.64.0.1"))
+	// The last aditd died with manhattan up: its anchor still blocks.
+	fw.previous = []string{"manhattan"}
+	if err := m.CleanUp(); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Autostart(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		status, _ := m.Status("manhattan")
+		if status.State == StateConnecting && status.Interface != "" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("manhattan did not come back up: %+v", status)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if fw.rules == nil {
+		t.Error("the kill switch let go")
+	}
+}
+
+func TestANewAditdLetsGoWhenNothingIsLeftToGuard(t *testing.T) {
+	m, _ := newTestManager(t)
+	fw := m.firewall.(*fakeFirewall)
+	fw.previous = []string{"gone"} // removed since
+	fw.rules = &firewall.Rules{Guards: []string{"gone"}}
+	m.CleanUp()
+	m.Autostart(context.Background())
+	if fw.rules != nil {
+		t.Error("an earlier aditd's kill switch kept blocking for a tunnel that is gone")
+	}
+}
+
+func TestStoppingAditdKeepsTheKillSwitch(t *testing.T) {
+	m, _ := newTestManager(t)
+	importText(t, m, "manhattan", fullFile("0.0.0.0/0", "10.64.0.1"))
+	if err := m.Up(context.Background(), "manhattan"); err != nil {
+		t.Fatal(err)
+	}
+	m.Close()
+	if fw := m.firewall.(*fakeFirewall); fw.rules == nil || !slices.Equal(fw.rules.Guards, []string{"manhattan"}) {
+		t.Errorf("aditd stopping opened the Mac: %+v", fw.rules)
+	}
+}
+
+func TestSignInLiftsTheKillSwitchForAWhile(t *testing.T) {
+	m, _ := newTestManager(t)
+	fw := m.firewall.(*fakeFirewall)
+	if _, err := m.SignIn(); err == nil || !strings.Contains(err.Error(), "the kill switch is off") {
+		t.Errorf("with nothing blocking: %v", err)
+	}
+	importText(t, m, "manhattan", fullFile("0.0.0.0/0", "10.64.0.1"))
+	m.SetKillSwitch("manhattan", "always")
+	m.signIn = 50 * time.Millisecond
+	clock := time.Now()
+	m.now = func() time.Time { return clock }
+
+	until, err := m.SignIn()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !until.Equal(clock.Add(50*time.Millisecond)) || fw.rules != nil {
+		t.Errorf("until %v, rules %+v", until, fw.rules)
+	}
+	status, _ := m.Status("manhattan")
+	if status.Blocking || !strings.Contains(strings.Join(status.Notes, " "), "to sign in to this network") {
+		t.Errorf("status %+v", status)
+	}
+
+	m.mu.Lock()
+	clock = clock.Add(time.Second)
+	m.mu.Unlock()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		m.mu.Lock()
+		back := fw.rules != nil
+		m.mu.Unlock()
+		if back {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the kill switch did not come back")
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }

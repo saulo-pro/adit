@@ -73,3 +73,15 @@ func TestOnMeansSwitchedOn(t *testing.T) {
 		}
 	}
 }
+
+func TestABlockingKillSwitchOffersSignIn(t *testing.T) {
+	rows := Rows([]api.Tunnel{{Name: "diner", State: "up"}, {Name: "manhattan", State: "down", KillSwitch: "always", Blocking: true}}, nil, nil, time.Now())
+	if rows[0].Title != "The internet is blocked until manhattan is up" || rows[1].Kind != KindSignIn || rows[1].Name != "manhattan" || rows[2].Kind != KindSeparator {
+		t.Errorf("rows %+v", rows[:3])
+	}
+	for _, row := range Rows([]api.Tunnel{{Name: "manhattan", State: "up", KillSwitch: "on-drop"}}, nil, nil, time.Now()) {
+		if row.Kind == KindSignIn {
+			t.Error("sign in offered while nothing blocks")
+		}
+	}
+}

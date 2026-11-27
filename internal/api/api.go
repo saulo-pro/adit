@@ -24,12 +24,14 @@ const (
 	CommandUp        = "up"
 	CommandDown      = "down"
 	CommandAutostart = "autostart"
+	CommandSignIn    = "signin"
 	CommandWatch     = "watch"
 	CommandVersion   = "version"
 
-	CommandImport = "import"
-	CommandRemove = "remove"
-	CommandExport = "export"
+	CommandImport     = "import"
+	CommandRemove     = "remove"
+	CommandExport     = "export"
+	CommandKillSwitch = "killswitch"
 )
 
 // MaxRequest bounds what aditd reads from one caller: an imported file is at most 1 MiB, and JSON
@@ -41,23 +43,27 @@ type Request struct {
 	Name    string `json:"name,omitempty"`
 	File    string `json:"file,omitempty"` // import: the file's text, never a path
 	On      *bool  `json:"on,omitempty"`   // autostart
+	Mode    string `json:"mode,omitempty"` // killswitch: off, on-drop or always
 }
 
 type Response struct {
-	OK       bool     `json:"ok"`
-	Error    *Error   `json:"error,omitempty"`
-	Tunnels  []Tunnel `json:"tunnels,omitempty"`  // list and watch
-	Others   []Tunnel `json:"others,omitempty"`   // list and watch: other software's tunnels, read-only
-	Tunnel   *Tunnel  `json:"tunnel,omitempty"`   // status, up, down, autostart, import
-	Warnings []string `json:"warnings,omitempty"` // import
-	File     string   `json:"file,omitempty"`     // export: holds the private key
-	Version  string   `json:"version,omitempty"`
+	OK       bool       `json:"ok"`
+	Error    *Error     `json:"error,omitempty"`
+	Tunnels  []Tunnel   `json:"tunnels,omitempty"`  // list and watch
+	Others   []Tunnel   `json:"others,omitempty"`   // list and watch: other software's tunnels, read-only
+	Tunnel   *Tunnel    `json:"tunnel,omitempty"`   // status, up, down, autostart, import
+	Warnings []string   `json:"warnings,omitempty"` // import
+	File     string     `json:"file,omitempty"`     // export: holds the private key
+	Version  string     `json:"version,omitempty"`
+	Until    *time.Time `json:"until,omitempty"` // signin: when the kill switch comes back
 }
 
 type Tunnel struct {
 	Name          string     `json:"name"`
 	State         string     `json:"state"` // down, connecting, up or idle
 	Autostart     bool       `json:"autostart"`
+	KillSwitch    string     `json:"killswitch,omitempty"` // a full tunnel's: off, on-drop or always
+	Blocking      bool       `json:"blocking,omitempty"`   // its kill switch blocks the internet now
 	Interface     string     `json:"interface,omitempty"`
 	LastHandshake *time.Time `json:"last_handshake,omitempty"`
 	ReceivedBytes uint64     `json:"received_bytes"`

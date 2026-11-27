@@ -18,6 +18,7 @@ import (
 	"github.com/saulo-pro/adit/internal/conf"
 	"github.com/saulo-pro/adit/internal/dns"
 	"github.com/saulo-pro/adit/internal/dnsdefault"
+	"github.com/saulo-pro/adit/internal/firewall"
 	"github.com/saulo-pro/adit/internal/others"
 	"github.com/saulo-pro/adit/internal/routes"
 	"github.com/saulo-pro/adit/internal/store"
@@ -47,6 +48,8 @@ type Status struct {
 	Received      uint64    // bytes, all peers
 	Sent          uint64
 	Notes         []string // what a person should know about it, one sentence each
+	KillSwitch    string   // a full tunnel's kill switch setting; empty for a split tunnel
+	Blocking      bool     // its kill switch blocks the internet now: it is not up
 	Source        string   // "adit", or the other software running it
 	ReadOnly      bool     // another program's tunnel: adit shows it and leaves it alone
 }
@@ -73,11 +76,18 @@ type device interface {
 
 // starter brings a tunnel up; beforeRoutes runs with its endpoints' addresses before its routes go
 // in.
-type starter func(ctx context.Context, c *conf.Config, beforeRoutes func(endpoints []netip.Addr) error) (device, error)
+type starter func(ctx context.Context, c *conf.Config, beforeRoutes func(endpoints []netip.AddrPort) error) (device, error)
 
 // bypasser keeps the routes a full tunnel needs beside its own: bypass.Routes in aditd.
 type bypasser interface {
 	Apply(bypass.Plan) error
+}
+
+// killSwitch blocks what does not go through adit's tunnels: firewall.Firewall in aditd.
+type killSwitch interface {
+	Block(firewall.Rules) error
+	Release() error
+	Guards() ([]string, error)
 }
 
 // defaultResolver makes a full tunnel's DNS servers the Mac's default: dnsdefault.Default in aditd.
@@ -93,7 +103,9 @@ type system struct {
 	now       func() time.Time
 	resolvers *dns.Resolvers
 	bypass    bypasser
+	firewall  killSwitch
 	dnsAll    defaultResolver
+	signIn    time.Duration                  // how long "Sign in to this network" lifts the kill switch
 	routes    func() ([]routes.Route, error) // the routing table: other tunnels and the local network
 	others    func() []others.Tunnel         // other software's tunnels: the WireGuard app's, wg-quick's
 	retryWait time.Duration                  // the first pause between tries of an autostart tunnel
@@ -113,8 +125,8 @@ type attempt struct {
 	cancel    context.CancelFunc
 	config    *conf.Config
 	shape     shape
-	endpoints []netip.Addr  // as resolved, once known: kept outside a full tunnel from the start
-	done      chan struct{} // closed once the attempt has finished and closed any device it made
+	endpoints []netip.AddrPort // as resolved, once known: kept outside a full tunnel from the start
+	done      chan struct{}    // closed once the attempt has finished and closed any device it made
 }
 
 type Manager struct {
@@ -131,11 +143,15 @@ type Manager struct {
 
 	othersSeen []others.Tunnel // other software's tunnels, as last read
 	othersRead time.Time
+
+	resume      []string  // full tunnels an earlier aditd's kill switch guarded: brought back up at start
+	pausedUntil time.Time // "Sign in to this network" lifts the kill switch until then
+	pauseTimer  *time.Timer
 }
 
 func New(st *store.Store, log *slog.Logger) *Manager {
 	return newManager(st, system{
-		start: func(ctx context.Context, c *conf.Config, beforeRoutes func([]netip.Addr) error) (device, error) {
+		start: func(ctx context.Context, c *conf.Config, beforeRoutes func([]netip.AddrPort) error) (device, error) {
 			t, err := tunnel.Start(ctx, c, beforeRoutes, log)
 			if err != nil {
 				return nil, err // not t: a nil *Tunnel in an interface is not nil
@@ -147,6 +163,14 @@ func New(st *store.Store, log *slog.Logger) *Manager {
 		bypass: &bypass.Routes{StateFile: bypass.DefaultStateFile, Table: routes.All, Run: func(args ...string) ([]byte, error) {
 			return exec.Command("/sbin/route", args...).CombinedOutput()
 		}},
+		firewall: &firewall.Firewall{Anchor: firewall.DefaultAnchor, StateFile: firewall.DefaultStateFile, Run: func(stdin string, args ...string) ([]byte, error) {
+			command := exec.Command("/sbin/pfctl", args...)
+			if stdin != "" {
+				command.Stdin = strings.NewReader(stdin)
+			}
+			return command.CombinedOutput()
+		}},
+		signIn: 2 * time.Minute,
 		dnsAll: &dnsdefault.Default{Run: func(script string) ([]byte, error) {
 			command := exec.Command("/usr/sbin/scutil")
 			command.Stdin = strings.NewReader(script)
@@ -175,11 +199,15 @@ func newManager(st *store.Store, sys system, log *slog.Logger) *Manager {
 
 // CleanUp removes what an aditd that stopped without cleaning up left behind. At start no tunnel
 // is up, so every resolver file and default resolver adit set is stale, and so are the routes a
-// full tunnel needed beside its own; interfaces and their routes die with the process.
+// full tunnel needed beside its own; interfaces and their routes die with the process. The kill
+// switch is not: it stays on, and the full tunnels it guarded come back up with Autostart, so the
+// Mac is never left open between two aditds.
 func (m *Manager) CleanUp() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return errors.Join(m.resolvers.ClearAll(), m.dnsAll.ClearAll(), m.bypass.Apply(bypass.Plan{}))
+	guards, err := m.firewall.Guards()
+	m.resume = guards
+	return errors.Join(m.resolvers.ClearAll(), m.dnsAll.ClearAll(), m.bypass.Apply(bypass.Plan{}), err)
 }
 
 // Changes signals after every import, removal, up, down and autostart change. Signals coalesce: a
@@ -253,6 +281,7 @@ func (m *Manager) Remove(name string) error {
 	if err := m.store.Remove(t.Name); err != nil {
 		return err
 	}
+	m.reapply() // its kill switch goes with it
 	m.log.Info("tunnel removed", "tunnel", t.Name)
 	m.notify()
 	return nil
@@ -315,17 +344,14 @@ func (m *Manager) up(ctx context.Context, name string, r *retry) error {
 
 	// Before the tunnel's routes go in, its endpoints get routes of their own when a full tunnel is
 	// up or this is one: otherwise the full tunnel's routes would take the packets that carry it.
-	beforeRoutes := func(endpoints []netip.Addr) error {
+	beforeRoutes := func(endpoints []netip.AddrPort) error {
 		m.mu.Lock()
 		defer m.mu.Unlock()
 		if m.starting[t.Name] != this {
 			return fmt.Errorf("taken down while it was coming up")
 		}
 		this.endpoints = endpoints
-		if err := m.applyBypass(); err != nil {
-			return fmt.Errorf("adit could not keep the endpoints outside the full tunnel: %w", err)
-		}
-		return nil
+		return m.apply()
 	}
 	dev, err := m.start(ctx, t.Config, beforeRoutes)
 
@@ -344,11 +370,11 @@ func (m *Manager) up(ctx context.Context, name string, r *retry) error {
 	}()
 	switch {
 	case err != nil:
-		m.reapplyBypass()
+		m.reapply()
 		return fmt.Errorf("%s did not come up: %w", t.Name, err)
 	case !current:
 		dev.Close()
-		m.reapplyBypass()
+		m.reapply()
 		return fmt.Errorf("%s was taken down while it was coming up", t.Name)
 	}
 	i := t.Config.Interface
@@ -359,11 +385,11 @@ func (m *Manager) up(ctx context.Context, name string, r *retry) error {
 	}
 	if err != nil {
 		dev.Close()
-		m.reapplyBypass()
+		m.reapply()
 		return fmt.Errorf("%s did not come up, since its DNS could not be set: %w", t.Name, err)
 	}
 	m.running[t.Name] = &running{dev: dev, config: t.Config, shape: shape, notes: notes}
-	m.reapplyBypass()
+	m.reapply()
 	m.log.Info("tunnel up", "tunnel", t.Name, "interface", dev.Interface(), "full", shape.full)
 	return nil
 }
@@ -423,16 +449,18 @@ func own(c *conf.Config, s shape) []netip.Prefix {
 	return mine
 }
 
-// applyBypass gives the routing table what a full tunnel needs beside its own, or takes it away when
-// none is up or coming up. Called with m.mu held.
-func (m *Manager) applyBypass() error {
+// apply gives the Mac what adit's tunnels need beside their own routes, as they are now: the routes
+// beside a full tunnel (or none), and the kill switch (on or off). Called with m.mu held.
+func (m *Manager) apply() error {
 	var plan bypass.Plan
 	full := false
-	var endpoints []netip.Addr
+	var endpoints []netip.AddrPort
+	var interfaces []string
 	for _, r := range m.running {
 		if r.shape.full {
 			full, plan.BlockIPv6 = true, !r.shape.ipv6
 		}
+		interfaces = append(interfaces, r.dev.Interface())
 		if status, err := r.dev.Status(); err == nil {
 			endpoints = append(endpoints, status.Endpoints()...)
 		}
@@ -444,16 +472,80 @@ func (m *Manager) applyBypass() error {
 		endpoints = append(endpoints, a.endpoints...)
 	}
 	if full {
-		plan.Endpoints = endpoints
+		for _, endpoint := range endpoints {
+			plan.Endpoints = append(plan.Endpoints, endpoint.Addr())
+		}
 	}
-	return m.bypass.Apply(plan)
+	if err := m.bypass.Apply(plan); err != nil {
+		return fmt.Errorf("adit could not keep the endpoints outside the full tunnel: %w", err)
+	}
+
+	guards, resume := m.guards()
+	if len(guards) == 0 || m.now().Before(m.pausedUntil) {
+		if err := m.firewall.Release(); err != nil {
+			return fmt.Errorf("adit could not turn the kill switch off: %w", err)
+		}
+		return nil
+	}
+	slices.Sort(interfaces)
+	rules := firewall.Rules{Interfaces: interfaces, Servers: endpoints, AllowLAN: true, Guards: resume}
+	if err := m.firewall.Block(rules); err != nil {
+		return fmt.Errorf("adit could not turn the kill switch on: %w", err)
+	}
+	return nil
 }
 
-// reapplyBypass is applyBypass where a failure can only be logged. Called with m.mu held.
-func (m *Manager) reapplyBypass() {
-	if err := m.applyBypass(); err != nil {
-		m.log.Warn("the routes beside the full tunnel are not as they should be", "error", err)
+// reapply is apply where a failure can only be logged. Called with m.mu held.
+func (m *Manager) reapply() {
+	if err := m.apply(); err != nil {
+		m.log.Warn("the routes or the kill switch are not as they should be", "error", err)
 	}
+}
+
+// guards are the full tunnels whose kill switch is on now: on-drop ones that are up, coming up or
+// being retried, and always ones, up or not. resume are those of them that are wanted up, which a
+// later aditd brings back. Called with m.mu held.
+func (m *Manager) guards() (guards, resume []string) {
+	tunnels, err := m.store.List()
+	if err != nil {
+		// Unreadable: keep blocking for what is known to be up rather than open the Mac.
+		m.log.Warn("could not read the tunnels' kill switch settings", "error", err)
+	}
+	for _, t := range tunnels {
+		mode := t.Settings.KillSwitchMode()
+		if full4, _ := covers(t.Config); !full4 || mode == store.KillSwitchOff {
+			continue
+		}
+		_, up := m.running[t.Name]
+		_, coming := m.starting[t.Name]
+		_, trying := m.retrying[t.Name]
+		wanted := up || coming || trying
+		if wanted || mode == store.KillSwitchAlways {
+			guards = append(guards, t.Name)
+		}
+		if wanted {
+			resume = append(resume, t.Name)
+		}
+	}
+	return guards, resume
+}
+
+// minutes says a duration the way a person would: "2 minutes".
+func minutes(d time.Duration) string {
+	if n := int(d.Round(time.Minute) / time.Minute); n > 1 {
+		return fmt.Sprintf("%d minutes", n)
+	}
+	return "a minute"
+}
+
+// blockingNow are the full tunnels whose kill switch blocks now: none while it is lifted to sign
+// in. Called with m.mu held.
+func (m *Manager) blockingNow() []string {
+	if m.now().Before(m.pausedUntil) {
+		return nil
+	}
+	guards, _ := m.guards()
+	return guards
 }
 
 // fullTunnel finds AllowedIPs that route everywhere, or a large part of it. It judges what the networks cover
@@ -751,8 +843,15 @@ func sameDomain(a, b string) bool {
 }
 
 // fullNotes say what a full tunnel does while it is up.
-func fullNotes(s shape) []string {
-	notes := []string{"it routes all traffic but the local network's and adit's other tunnels', and its DNS servers answer every name but the other tunnels' domains; if it drops, traffic goes out directly"}
+func fullNotes(s shape, killSwitch string) []string {
+	drop := "if it drops, traffic goes out directly (kill switch off)"
+	switch killSwitch {
+	case store.KillSwitchOnDrop:
+		drop = "if it drops, the internet is blocked until it is back (kill switch)"
+	case store.KillSwitchAlways:
+		drop = "whenever it is down, the internet is blocked (kill switch: always)"
+	}
+	notes := []string{"it routes all traffic but the local network's and adit's other tunnels', and its DNS servers answer every name but the other tunnels' domains; " + drop}
 	if !s.ipv6 {
 		notes = append(notes, "IPv6 is blocked while it is up, since it carries only IPv4")
 	}
@@ -812,7 +911,7 @@ func (m *Manager) down(name string) {
 		delete(m.running, name)
 		m.log.Info("tunnel down", "tunnel", name)
 	}
-	m.reapplyBypass()
+	m.reapply()
 }
 
 func (m *Manager) clearDNS(name string, s shape) error {
@@ -840,6 +939,58 @@ func (m *Manager) SetAutostart(name string, on bool) error {
 	return nil
 }
 
+// SetKillSwitch chooses when a full tunnel's kill switch blocks: KillSwitchOff, OnDrop or Always.
+func (m *Manager) SetKillSwitch(name, mode string) error {
+	if mode != store.KillSwitchOff && mode != store.KillSwitchOnDrop && mode != store.KillSwitchAlways {
+		return fmt.Errorf("the kill switch is %s, %s or %s, not %q", store.KillSwitchOnDrop, store.KillSwitchAlways, store.KillSwitchOff, mode)
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	t, err := m.store.Get(name)
+	if err != nil {
+		return err
+	}
+	if full4, _ := covers(t.Config); !full4 {
+		return fmt.Errorf("%s routes only its own networks; the kill switch is for a full tunnel, which routes everything", t.Name)
+	}
+	settings := t.Settings
+	settings.KillSwitch = mode
+	if err := m.store.SetSettings(t.Name, settings); err != nil {
+		return err
+	}
+	m.log.Info("kill switch set", "tunnel", t.Name, "mode", mode)
+	err = m.apply()
+	m.notify()
+	return err
+}
+
+// SignIn lifts the kill switch for a short while, so a hotel's or an airport's sign-in page can be
+// reached before the full tunnel can connect. It returns when the kill switch comes back.
+func (m *Manager) SignIn() (time.Time, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if guards, _ := m.guards(); len(guards) == 0 {
+		return time.Time{}, fmt.Errorf("the kill switch is off, so nothing stops signing in to this network")
+	}
+	m.pausedUntil = m.now().Add(m.signIn)
+	if m.pauseTimer != nil {
+		m.pauseTimer.Stop()
+	}
+	m.pauseTimer = time.AfterFunc(m.signIn, func() {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		m.pausedUntil = time.Time{}
+		m.reapply()
+		m.log.Info("kill switch back on after signing in to the network")
+		m.notify()
+	})
+	m.log.Info("kill switch lifted to sign in to the network", "until", m.pausedUntil)
+	err := m.apply()
+	m.notify()
+	return m.pausedUntil, err
+}
+
 // List reports every tunnel adit holds, sorted by name.
 func (m *Manager) List() ([]Status, error) {
 	m.mu.Lock()
@@ -849,9 +1000,10 @@ func (m *Manager) List() ([]Status, error) {
 	if err != nil {
 		return nil, err
 	}
+	blocking := m.blockingNow()
 	statuses := make([]Status, 0, len(tunnels))
 	for _, t := range tunnels {
-		status, err := m.status(t)
+		status, err := m.status(t, blocking)
 		if err != nil {
 			return nil, err
 		}
@@ -869,11 +1021,27 @@ func (m *Manager) Status(name string) (Status, error) {
 	if err != nil {
 		return Status{}, err
 	}
-	return m.status(t)
+	return m.status(t, m.blockingNow())
 }
 
-func (m *Manager) status(t *store.Tunnel) (Status, error) {
+func (m *Manager) status(t *store.Tunnel, blocking []string) (Status, error) {
 	status := Status{Name: t.Name, Autostart: t.Settings.Autostart, State: StateDown, Notes: dnsNotes(t.Config), Source: "adit"}
+	full4, _ := covers(t.Config)
+	if full4 {
+		status.KillSwitch = t.Settings.KillSwitchMode()
+	}
+	_, up := m.running[t.Name]
+	if full4 && !up && slices.Contains(blocking, t.Name) {
+		status.Blocking = true
+		lift := "adit down " + t.Name
+		if status.KillSwitch == store.KillSwitchAlways {
+			lift = "adit killswitch " + t.Name + " off"
+		}
+		status.Notes = append(status.Notes, fmt.Sprintf("the internet is blocked until %s is up (kill switch); %s lets it through, and adit signin lifts it for %s to sign in to a network", t.Name, lift, minutes(m.signIn)))
+	}
+	if full4 && m.now().Before(m.pausedUntil) {
+		status.Notes = append(status.Notes, fmt.Sprintf("the kill switch is lifted until %s, to sign in to this network", m.pausedUntil.Local().Format("15:04:05")))
+	}
 	if _, coming := m.starting[t.Name]; coming {
 		status.State = StateConnecting
 		return status, nil
@@ -890,7 +1058,7 @@ func (m *Manager) status(t *store.Tunnel) (Status, error) {
 		return status, nil
 	}
 	if r.shape.full {
-		status.Notes = fullNotes(r.shape)
+		status.Notes = append(fullNotes(r.shape, status.KillSwitch), status.Notes...)
 	}
 	status.Notes = append(status.Notes, r.notes...)
 	status.Notes = append(status.Notes, r.live...)
@@ -947,7 +1115,12 @@ func (m *Manager) Close() error {
 		errs = append(errs, m.clearDNS(name, r.shape), r.dev.Close())
 		delete(m.running, name)
 	}
+	// The kill switch stays as it is: aditd stopping (an upgrade, a restart) must not open the Mac.
+	// The next aditd takes it over, and `adit uninstall` removes it.
 	errs = append(errs, m.bypass.Apply(bypass.Plan{}))
+	if m.pauseTimer != nil {
+		m.pauseTimer.Stop()
+	}
 	m.notify()
 	return errors.Join(errs...)
 }
