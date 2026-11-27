@@ -9,7 +9,9 @@ asks.
 
 - **Tags.** Each release is a tag `vX.Y.Z`. A pushed tag is never moved or deleted: a fix is a new
   version.
-- **GitHub releases.** Every tag gets a GitHub release, made by `.github/workflows/release.yml`.
+- **GitHub releases.** Every tag gets a GitHub release, made by `.github/workflows/release.yml`:
+  a build job with a read-only token, then a publish job in the `release` environment. Releases are
+  immutable, so the job drafts, uploads, then publishes.
   Anything not stable (`v0.2.0-rc.1`: any version with a suffix) is published as a prerelease, so
   it never becomes GitHub's "Latest release".
 - **The standard install gets GitHub's Latest release.** Never the tip of `main`, and never a version

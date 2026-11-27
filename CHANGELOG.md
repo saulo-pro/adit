@@ -7,6 +7,11 @@ notes of its GitHub release.
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-11-27
+
+Security fixes from a full review of adit, its dependencies and how it is built and installed.
+Install it again after upgrading: `sudo adit install` (Homebrew) or the one-line installer.
+
 ### Security
 
 - Releases are built with no cache from earlier CI runs, with every module checked against `go.sum`,
@@ -119,5 +124,6 @@ The first version, for macOS.
 - Homebrew: `brew install saulo-pro/tap/adit`.
 - Full tunnels (`AllowedIPs = 0.0.0.0/0`) are refused for now, saying so.
 
-[Unreleased]: https://github.com/saulo-pro/adit/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/saulo-pro/adit/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/saulo-pro/adit/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/saulo-pro/adit/releases/tag/v0.1.2

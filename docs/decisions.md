@@ -175,3 +175,31 @@ found their way into test fixtures. 0.1.0 and 0.1.1 are no longer on GitHub. The
 the Go module proxy, which keeps every version it has seen, so those tag names are never reused and
 the new repository's first release is 0.1.2. Fixtures and examples use fictional names and made-up
 addresses.
+
+## 2026-11-27 — Security review and what it changed
+
+A review of the whole repository, its dependencies and its release path (17 reviewers, every finding
+traced, challenged and scored with CVSS v3.1) found 70 issues: 2 High, 10 Medium, 40 Low and 18
+hardening notes, none critical and none giving root from outside the adit group. 0.1.3 fixes the
+High and Medium ones and most of the rest. Decisions it led to:
+
+- Releases are built without the shared Go cache, with `go mod verify`, in a job that cannot publish;
+  a second job publishes from the built artifact in the `release` environment. Actions are pinned to
+  commits. Each archive has a build provenance attestation. Releases are immutable: drafted, filled,
+  then published.
+- `main` takes no force push or deletion and needs signed commits; `v*` tags cannot be moved or
+  deleted (repository rulesets, the tap too).
+- The tray's LaunchAgent runs a root-owned copy, so no account's file runs in another's session.
+  With Homebrew, `adit` itself still lives in a folder its owner's programs can change: inside a
+  command run through `sudo` that cannot be closed, so `sudo adit install` says so and installs only
+  copies of what it checked.
+- Limits a configuration file may not exceed (DNS servers and domains, peers, AllowedIPs,
+  addresses, size), and address ranges and domains it may not take, are enforced at import.
+- The landing page keeps its analytics, under a Content-Security-Policy that allows only that script
+  and its endpoint.
+- `v0.1.2` stays: it was published, the Go module proxy keeps its source anyway, and the rule is
+  that a published tag is never deleted. 0.1.3, from the single clean commit's line, is the Latest.
+
+Left for later, by choice: an Apple Developer ID with notarisation (the attestation covers
+provenance meanwhile), signing SHA256SUMS with a key install.sh pins, and a packet filter per tunnel.
+
