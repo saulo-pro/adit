@@ -34,6 +34,12 @@ asks.
   in `main()`, called on its last line, so a download cut short by `curl … | sh` runs nothing.
   `test/installer` checks it.
 
+## Nothing about the maintainer
+
+This repository is public. Never write anything about the maintainer's machines, networks,
+infrastructure, credentials or way of working into it: not in files, commit messages, tags, release
+notes, issues or pull requests. Decisions about those belong elsewhere, not here.
+
 ## Examples and test data
 
 This repository is public. Names, accounts, hosts and addresses in tests, fixtures, docs and examples
