@@ -93,10 +93,12 @@ jobs:
           # release that install.sh downloads.
           prerelease=false
           [[ $TAG == *-* ]] && prerelease=true
+          # Releases are immutable once published: create a draft, attach the files, then publish.
           if gh release view "$TAG" > /dev/null 2>&1; then
             gh release edit "$TAG" --notes-file dist/notes.md --prerelease="$prerelease"
           else
-            gh release create "$TAG" --verify-tag --title "adit ${TAG#v}" \
+            gh release create "$TAG" --verify-tag --draft --title "adit ${TAG#v}" \
               --notes-file dist/notes.md --prerelease="$prerelease"
+            gh release upload "$TAG" dist/adit-macos.tar.gz dist/SHA256SUMS
+            gh release edit "$TAG" --draft=false
           fi
-          gh release upload "$TAG" dist/adit-macos.tar.gz dist/SHA256SUMS --clobber

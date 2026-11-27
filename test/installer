@@ -80,7 +80,7 @@ done
 sudo launchctl print "system/$label" | grep -q 'state = running' || fail "launchd does not show aditd running"
 [[ $("$bin/aditd" -version) == "$version" ]] || fail "aditd is not $version"
 "$bin/adit" version | grep -q "adit $version" || fail "adit is not $version"
-grep -q "$bin/adit-tray" "/Library/LaunchAgents/$label.tray.plist" || fail "the menu bar icon does not start from $bin"
+grep -q "/Library/PrivilegedHelperTools/$label.tray" "/Library/LaunchAgents/$label.tray.plist" || fail "the menu bar icon does not start from its root-owned copy"
 expect 0 "$bin/adit" list
 echo "adit, aditd and adit-tray are root's, in $bin; aditd $version runs; $(id -un) uses adit without sudo"
 
@@ -93,7 +93,7 @@ step "remove, as the installer says"
 sudo "$bin/adit" uninstall --yes
 sudo rm "$bin/adit" "$bin/aditd" "$bin/adit-tray"
 for path in "$bin/adit" "$bin/aditd" "$bin/adit-tray" "/Library/LaunchDaemons/$label.plist" \
-  "/Library/LaunchAgents/$label.tray.plist" "/Library/PrivilegedHelperTools/$label" /var/db/adit; do
+  "/Library/LaunchAgents/$label.tray.plist" "/Library/PrivilegedHelperTools/$label" "/Library/PrivilegedHelperTools/$label.tray" /var/db/adit; do
   [[ ! -e $path ]] || fail "$path was left behind"
 done
 echo "nothing left"
