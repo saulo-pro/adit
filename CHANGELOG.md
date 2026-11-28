@@ -7,6 +7,27 @@ notes of its GitHub release.
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-11-28
+
+What the first days with 0.2.0 asked for: a way to act on a tunnel's DNS note, the notes in the
+command line, and the tunnels in the order their routes win.
+
+### Added
+
+- `sudo adit dns NAME DOMAIN...` sends the names under those domains to a tunnel's DNS servers,
+  beside any its file names, without editing the file; `none` takes them away. On a tunnel that is up
+  it takes effect at once.
+- A tunnel may resolve the whole `.internal` (and `home.arpa`), the top-level domains set aside for
+  private networks.
+- `adit import` and `adit list` print what the menu shows under a tunnel, each note with the command
+  that fixes it.
+
+### Changed
+
+- Tunnels are listed from the one that routes the least to the full tunnel, last, in the menu and in
+  `adit list`: the order in which their routes win.
+- Notes and errors say "DNS server" and "domains" instead of "DNS line".
+
 ## [0.2.0] - 2026-11-27
 
 Full tunnels, beside split tunnels, with a kill switch. After upgrading, run `sudo adit install`
@@ -158,7 +179,8 @@ The first version, for macOS.
 - Homebrew: `brew install saulo-pro/tap/adit`.
 - Full tunnels (`AllowedIPs = 0.0.0.0/0`) are refused for now, saying so.
 
-[Unreleased]: https://github.com/saulo-pro/adit/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/saulo-pro/adit/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/saulo-pro/adit/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/saulo-pro/adit/compare/v0.1.3...v0.2.0
 [0.1.3]: https://github.com/saulo-pro/adit/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/saulo-pro/adit/releases/tag/v0.1.2

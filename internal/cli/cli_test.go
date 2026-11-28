@@ -586,7 +586,7 @@ func TestImportSummaryOfAFullTunnel(t *testing.T) {
 	if got != want {
 		t.Errorf("got:\n%s", got)
 	}
-	if got := whatItChanges("manhattan", []byte(fmt.Sprintf(base, ""))); !strings.Contains(got, "it needs a DNS line to come up") {
+	if got := whatItChanges("manhattan", []byte(fmt.Sprintf(base, ""))); !strings.Contains(got, "it needs a DNS server to come up") {
 		t.Errorf("without DNS:\n%s", got)
 	}
 }
@@ -619,5 +619,34 @@ func TestSignInOpensTheSignInPage(t *testing.T) {
 	}
 	if opened != "http://captive.apple.com/" || !strings.Contains(run.stdout.String(), "The kill switch is lifted until "+until.Local().Format("15:04:05")) {
 		t.Errorf("opened %q, said %q", opened, run.stdout)
+	}
+}
+
+func TestDNSSendsTheDomains(t *testing.T) {
+	run := newRun(t, func(req api.Request) api.Response {
+		return api.Response{OK: true, Tunnel: &api.Tunnel{Name: req.Name, State: "down"}}
+	})
+	if code := run.cli("dns", "diner", "internal", "corp.example"); code != 0 {
+		t.Fatalf("exit %d: %s", code, run.stderr)
+	}
+	if req := run.requests[0]; req.Command != api.CommandDNS || strings.Join(req.Domains, " ") != "internal corp.example" {
+		t.Errorf("request %+v", req)
+	}
+	if want := "Names under internal, corp.example go to diner's DNS servers while it is up.\n"; run.stdout.String() != want {
+		t.Errorf("got %q", run.stdout)
+	}
+	run.stdout.Reset()
+	run.cli("dns", "diner", "none")
+	if req := run.requests[1]; len(req.Domains) != 0 {
+		t.Errorf("none sent %v", req.Domains)
+	}
+}
+
+func TestListShowsNotesUnderTheTable(t *testing.T) {
+	note := "its DNS server 10.99.1.1 is not used: adit sends a tunnel's DNS queries only for the domains you name; run sudo adit dns diner corp.example (with its own domains) to send the names under them there"
+	run := newRun(t, answerWith([]api.Tunnel{{Name: "diner", State: "down", Notes: []string{note}}}))
+	run.cli("list")
+	if !strings.HasSuffix(run.stdout.String(), "\ndiner: "+note+".\n") {
+		t.Errorf("got:\n%s", run.stdout)
 	}
 }

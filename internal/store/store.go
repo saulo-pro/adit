@@ -41,6 +41,9 @@ type Settings struct {
 	Autostart  bool   `json:"autostart"`
 	KillSwitch string `json:"killswitch,omitempty"` // a full tunnel's: KillSwitchOff, OnDrop or Always; empty is OnDrop
 	LAN        string `json:"lan,omitempty"`        // a full tunnel's: LANAllow or LANBlock; empty is LANAllow
+	// Domains are DNS domains given with `adit dns`, beside any on the file's DNS line: names under
+	// them go to the tunnel's DNS servers. Kept here, so the .conf stays the file that was imported.
+	Domains []string `json:"domains,omitempty"`
 }
 
 // A full tunnel lets the local network be reached beside it, or blocks it:
@@ -277,6 +280,13 @@ func (s *Store) load(name string) (*Tunnel, error) {
 	default:
 		if err := json.Unmarshal(settings, &tunnel.Settings); err != nil {
 			return nil, fmt.Errorf("the settings of tunnel %s are damaged: %w", name, err)
+		}
+	}
+	// The domains given with `adit dns` count as if they were on the file's DNS line.
+	for _, domain := range tunnel.Settings.Domains {
+		folded := strings.TrimSuffix(strings.ToLower(domain), ".")
+		if !slices.ContainsFunc(config.Interface.DNSSearch, func(d string) bool { return strings.TrimSuffix(strings.ToLower(d), ".") == folded }) {
+			config.Interface.DNSSearch = append(config.Interface.DNSSearch, domain)
 		}
 	}
 	return tunnel, nil

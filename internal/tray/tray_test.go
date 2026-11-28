@@ -86,12 +86,22 @@ func TestABlockingKillSwitchOffersSignIn(t *testing.T) {
 	}
 }
 
-func TestTheFullTunnelComesFirstUnderTheSummary(t *testing.T) {
-	rows := Rows([]api.Tunnel{{Name: "diner", State: "up"}, {Name: "manhattan", State: "up", KillSwitch: "on-drop", LAN: "allow"}}, nil, nil, now)
+func TestTunnelsGoFromNarrowestToTheFullTunnel(t *testing.T) {
+	rows := Rows([]api.Tunnel{
+		{Name: "manhattan", State: "up", KillSwitch: "on-drop", LAN: "allow", Networks: []string{"0.0.0.0/0"}},
+		{Name: "diner", State: "up", Networks: []string{"10.99.0.0/16"}},
+		{Name: "cupcakes", State: "down", Networks: []string{"10.98.1.4/32", "10.98.1.5/32"}},
+	}, nil, nil, now)
 	if rows[0].Kind != KindMessage || !strings.HasPrefix(rows[0].Tooltip, "Everything goes through manhattan, except diner and the local network") || rows[1].Kind != KindSeparator {
 		t.Errorf("top rows %+v", rows[:2])
 	}
-	if rows[2].Name != "manhattan" || rows[2].Title != "manhattan (all traffic) — up" || rows[3].Name != "diner" {
-		t.Errorf("tunnel rows %+v", rows[2:])
+	var order []string
+	for _, row := range rows {
+		if row.Kind == KindTunnel {
+			order = append(order, row.Name)
+		}
+	}
+	if strings.Join(order, " ") != "cupcakes diner manhattan" {
+		t.Errorf("order %v", order)
 	}
 }

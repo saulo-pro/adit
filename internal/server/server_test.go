@@ -459,6 +459,16 @@ func (f *fakeTunnels) Down(name string) error {
 	return nil
 }
 
+func (f *fakeTunnels) SetDomains(name string, domains []string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, err := f.get(name); err != nil {
+		return err
+	}
+	f.changed()
+	return nil
+}
+
 func (f *fakeTunnels) SetLAN(name, mode string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()

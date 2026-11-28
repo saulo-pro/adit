@@ -148,6 +148,31 @@ func (c *CLI) lan(ctx context.Context, out *output, args []string) error {
 	return nil
 }
 
+func (c *CLI) dns(ctx context.Context, out *output, args []string) error {
+	positional, err := parse(out, newFlags("dns"), args, 2, maxDomainArgs+1, "NAME DOMAIN...|none")
+	if err != nil {
+		return err
+	}
+	domains := positional[1:]
+	if len(domains) == 1 && domains[0] == "none" {
+		domains = nil
+	}
+	resp, err := c.Client.Do(ctx, api.Request{Command: api.CommandDNS, Name: positional[0], Domains: domains})
+	if err != nil {
+		return err
+	}
+	name := resp.Tunnel.Name
+	words := fmt.Sprintf("%s no longer has domains of its own beside its file's.\n", name)
+	if len(domains) > 0 {
+		words = fmt.Sprintf("Names under %s go to %s's DNS servers while it is up.\n", strings.Join(domains, ", "), name)
+	}
+	c.print(out, c.jsonTunnel(*resp.Tunnel), words+notes(*resp.Tunnel))
+	return nil
+}
+
+// maxDomainArgs is how many domains `adit dns` takes at once, as aditd does.
+const maxDomainArgs = 32
+
 // signinPage is a page macOS itself uses to find a network's sign-in page: a captive network sends
 // the browser to its own instead.
 const signinPage = "http://captive.apple.com/"
@@ -236,6 +261,7 @@ func (c *CLI) importFile(ctx context.Context, out *output, args []string) error 
 	}
 	fmt.Fprintf(&words, "Imported %s. Bring it up with: adit up %s\n", resp.Tunnel.Name, resp.Tunnel.Name)
 	words.WriteString(whatItChanges(resp.Tunnel.Name, text))
+	words.WriteString(notes(*resp.Tunnel))
 	warnings := resp.Warnings
 	if warnings == nil {
 		warnings = []string{}
@@ -430,6 +456,7 @@ func (c *CLI) table(tunnels, others []api.Tunnel) string {
 	var b strings.Builder
 	w := tabwriter.NewWriter(&b, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(w, "NAME\tSTATE\tINTERFACE\tHANDSHAKE\tRECEIVED\tSENT\tAUTOSTART\tBY")
+	tunnels = api.SortByReach(tunnels)
 	for _, t := range tunnels {
 		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\tadit\n", t.Name, t.State, orDash(t.Interface), c.age(t),
 			c.bytes(t, t.ReceivedBytes), c.bytes(t, t.SentBytes), onOff(t.Autostart))
@@ -441,6 +468,17 @@ func (c *CLI) table(tunnels, others []api.Tunnel) string {
 	w.Flush()
 	if summary := api.Summary(tunnels); summary != "" {
 		fmt.Fprintf(&b, "\n%s\n", summary)
+	}
+	// What the menu shows under a tunnel, the list shows too: a note says what to do about it.
+	first := true
+	for _, t := range tunnels {
+		for _, note := range t.Notes {
+			if first {
+				b.WriteString("\n")
+				first = false
+			}
+			fmt.Fprintf(&b, "%s: %s.\n", t.Name, note)
+		}
 	}
 	return b.String()
 }
@@ -582,7 +620,7 @@ func whatItChanges(name string, text []byte) string {
 		if len(servers) > 0 {
 			fmt.Fprintf(&b, "and sends every name but the other tunnels' domains to %s\n", strings.Join(servers, ", "))
 		} else {
-			b.WriteString("but it needs a DNS line to come up: without one, names would be looked up outside it\n")
+			b.WriteString("but it needs a DNS server to come up (DNS = 10.64.0.1 in its file): without one, names would be looked up outside it\n")
 		}
 		fmt.Fprintf(&b, "Kill switch on: while it is coming up or has dropped, the internet is blocked (sudo adit killswitch %s always|off to change)\n", name)
 		fmt.Fprintf(&b, "The local network stays reachable (sudo adit lan %s block to block it)\n", name)

@@ -283,3 +283,15 @@ kernel's own route (`route -n get`), the tunnel behind its interface (adit's, wg
 WireGuard app's), and for a name, the resolver that answers it (a tunnel's resolver file, the full
 tunnel's default resolver, or the network's). It reads only, needs no root, and is open to the adit
 group.
+
+## 2026-11-27 — DNS domains as a setting; tunnels listed by reach
+
+A split tunnel's DNS servers answer only the domains it is given, so a file with `DNS = 10.99.1.1` and
+no domain left people with a note and no way to act on it short of editing the file and importing it
+again. `sudo adit dns NAME DOMAIN...` gives the domains as a setting, kept beside the file like the
+kill switch and the local network, so the `.conf` stays the file that was imported; it takes effect at
+once on a tunnel that is up. `.internal` and `home.arpa`, the top-level domains set aside for private
+networks, may be taken whole; any other top-level domain is still refused. Notes now say what to run.
+
+The menu and `adit list` order tunnels by how much of the address space they route, narrowest first,
+so the full tunnel comes last: the order in which their routes win.

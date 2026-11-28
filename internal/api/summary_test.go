@@ -1,6 +1,9 @@
 package api
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestSummary(t *testing.T) {
 	full := Tunnel{Name: "manhattan", State: "up", KillSwitch: "on-drop", LAN: "allow"}
@@ -18,5 +21,21 @@ func TestSummary(t *testing.T) {
 		if got := Summary(tunnels); got != want {
 			t.Errorf("got %q, want %q", got, want)
 		}
+	}
+}
+
+func TestSortByReach(t *testing.T) {
+	sorted := SortByReach([]Tunnel{
+		{Name: "chestnut", Networks: []string{"10.99.1.0/24"}},
+		{Name: "manhattan", KillSwitch: "on-drop", Networks: []string{"0.0.0.0/0"}},
+		{Name: "williamsburg", Networks: []string{"10.99.3.0/24", "10.98.1.4/32", "10.98.1.5/32"}},
+		{Name: "diner", Networks: []string{"10.99.2.0/24"}},
+	})
+	var names []string
+	for _, t := range sorted {
+		names = append(names, t.Name)
+	}
+	if got := strings.Join(names, " "); got != "chestnut diner williamsburg manhattan" {
+		t.Errorf("order %s", got)
 	}
 }

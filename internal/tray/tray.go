@@ -7,9 +7,7 @@
 package tray
 
 import (
-	"cmp"
 	"fmt"
-	"slices"
 	"strings"
 	"time"
 
@@ -41,11 +39,8 @@ const maxDetail = 70
 // Rows lays out the menu. failures are the sentences from clicks that failed, by tunnel.
 func Rows(tunnels, others []api.Tunnel, failures map[string]string, now time.Time) []Row {
 	var rows []Row
-	// The full tunnel comes first: it decides where everything else goes.
-	tunnels = slices.Clone(tunnels)
-	slices.SortStableFunc(tunnels, func(a, b api.Tunnel) int {
-		return cmp.Compare(btoi(a.KillSwitch == ""), btoi(b.KillSwitch == ""))
-	})
+	// From the tunnel that routes the least to the full tunnel, last: a narrower route wins.
+	tunnels = api.SortByReach(tunnels)
 	blocking := false
 	for _, t := range tunnels {
 		blocking = blocking || t.Blocking
@@ -121,13 +116,6 @@ func title(t api.Tunnel, now time.Time) string {
 	default:
 		return fmt.Sprintf("%s — %s", name, t.State)
 	}
-}
-
-func btoi(b bool) int {
-	if b {
-		return 1
-	}
-	return 0
 }
 
 func tooltip(t api.Tunnel) string {

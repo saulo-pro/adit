@@ -3,7 +3,7 @@
 A client for WireGuard® tunnels on macOS that keeps several of them up at once, with a menu bar
 icon and a command line that do the same things.
 
-> **Status:** 0.2.0: full tunnels, beside split tunnels, with a kill switch.
+> **Status:** 0.2.1: full tunnels, beside split tunnels, with a kill switch.
 
 ## What it is for
 
@@ -33,6 +33,7 @@ back after a reboot. adit covers both:
   tunnels needs none.
 - **DNS per tunnel.** `DNS = 10.99.1.1, corp.example` sends names under `corp.example` to
   `10.99.1.1` and leaves every other name alone; a full tunnel's DNS servers answer every other name.
+  `sudo adit dns work corp.example` names the domains without editing the file.
 - **Honest status**: the last handshake and the bytes each way, not just "connected".
 - **Plain WireGuard `.conf` files** in and out, the same ones `wg-quick` and the official apps read.
 - **Other software's tunnels shown read-only**: the WireGuard app's and `wg-quick`'s, with
@@ -76,9 +77,10 @@ adit status                    # every tunnel, adit's and other software's
 adit status work --json
 adit autostart work on         # bring it up at boot
 adit route git.corp.example    # which tunnel carries it, and who looks it up
+sudo adit dns work corp.example   # send names under corp.example to work's DNS servers
 adit down work
 
-sudo adit import home.conf     # a full tunnel: AllowedIPs = 0.0.0.0/0 and a DNS line
+sudo adit import home.conf     # a full tunnel: AllowedIPs = 0.0.0.0/0 and a DNS server
 adit up home                   # everything goes through it, beside work
 sudo adit killswitch home always   # on-drop (default), always or off
 sudo adit lan home block       # allow (default) or block the local network

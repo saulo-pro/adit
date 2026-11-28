@@ -71,7 +71,7 @@ func (r *Resolvers) Check(tunnel string, domains []string) error {
 				switch {
 				case err != nil || owner == tunnel:
 				case owner == "":
-					return &notOurs{fmt.Sprintf("%s already sends names under %s to other servers, and %s overlaps it; take %s off %s's DNS line", filepath.Join(r.Dir, name), name, domain, domain, tunnel)}
+					return &notOurs{fmt.Sprintf("%s already sends names under %s to other servers, and %s overlaps it; take %s off %s's DNS domains", filepath.Join(r.Dir, name), name, domain, domain, tunnel)}
 				default:
 					return &notOurs{fmt.Sprintf("the tunnel %s resolves %s, which overlaps %s", owner, name, domain)}
 				}
@@ -86,7 +86,7 @@ func (r *Resolvers) Check(tunnel string, domains []string) error {
 		case err != nil:
 			return err
 		case owner == "":
-			return &notOurs{fmt.Sprintf("%s exists and adit did not write it; remove it, or take %s off %s's DNS line", path, domain, tunnel)}
+			return &notOurs{fmt.Sprintf("%s exists and adit did not write it; remove it, or take %s off %s's DNS domains", path, domain, tunnel)}
 		case owner != tunnel:
 			return &notOurs{fmt.Sprintf("%s belongs to the tunnel %s, which resolves %s already", path, owner, domain)}
 		}

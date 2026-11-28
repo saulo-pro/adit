@@ -1,7 +1,11 @@
 package api
 
 import (
+	"cmp"
 	"fmt"
+	"math"
+	"net/netip"
+	"slices"
 	"strings"
 )
 
@@ -55,4 +59,27 @@ func list(names []string) string {
 		return strings.Join(names, "")
 	}
 	return strings.Join(names[:len(names)-1], ", ") + " and " + names[len(names)-1]
+}
+
+// SortByReach orders tunnels from the one that routes the least to the one that routes the most, so
+// a full tunnel comes last: the order in which the routes win (a narrower route beats a wider one).
+// Ties keep the order they came in: aditd's, by name.
+func SortByReach(tunnels []Tunnel) []Tunnel {
+	sorted := slices.Clone(tunnels)
+	slices.SortStableFunc(sorted, func(a, b Tunnel) int { return cmp.Compare(reach(a), reach(b)) })
+	return sorted
+}
+
+// reach is the share of the address space a tunnel routes, IPv4 and IPv6 added: 2 for everything.
+func reach(t Tunnel) float64 {
+	if t.KillSwitch != "" {
+		return 3 // a full tunnel, whatever its networks say
+	}
+	var share float64
+	for _, network := range t.Networks {
+		if prefix, err := netip.ParsePrefix(network); err == nil {
+			share += math.Ldexp(1, -prefix.Bits())
+		}
+	}
+	return share
 }

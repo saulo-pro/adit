@@ -266,6 +266,28 @@ func (p *parser) interfaceSetting(n int, key, value string) error {
 	return nil
 }
 
+// privateTLDs are the top-level domains set aside for private networks, which a tunnel may take
+// whole: .internal (ICANN, 2024) and home.arpa (RFC 8375). Any other top-level domain belongs to the
+// internet.
+var privateTLDs = []string{"internal", "home.arpa"}
+
+// CheckDomain says whether a tunnel may resolve the names under domain: a host name, not a whole
+// public top-level domain, and not mDNS's .local.
+func CheckDomain(domain string) error {
+	if !validHostname(domain) {
+		return fmt.Errorf("%s is not a domain name", shown(domain))
+	}
+	folded := strings.TrimSuffix(strings.ToLower(domain), ".")
+	switch {
+	case slices.Contains(privateTLDs, folded):
+	case !strings.Contains(folded, "."):
+		return fmt.Errorf("the DNS domain %s is a whole top-level domain; a tunnel may resolve names under a domain of its own, such as corp.example, or the private .internal", shown(domain))
+	case folded == "local" || strings.HasSuffix(folded, ".local"):
+		return fmt.Errorf("the DNS domain %s is for the local network's own names (mDNS); a tunnel cannot resolve it", shown(domain))
+	}
+	return nil
+}
+
 // dns sorts each entry into a server address or a search domain, as wg-quick does.
 func (p *parser) dns(n int, value string) error {
 	entries, err := splitList(n, "DNS", value)
@@ -280,11 +302,8 @@ func (p *parser) dns(n int, value string) error {
 			}
 		} else if validHostname(entry) {
 			folded := strings.TrimSuffix(strings.ToLower(entry), ".")
-			switch {
-			case !strings.Contains(folded, "."):
-				return lineError(n, "the DNS domain %s is a whole top-level domain; a tunnel may resolve names under a domain of its own, such as corp.example", shown(entry))
-			case folded == "local" || strings.HasSuffix(folded, ".local"):
-				return lineError(n, "the DNS domain %s is for the local network's own names (mDNS); a tunnel cannot resolve it", shown(entry))
+			if err := CheckDomain(entry); err != nil {
+				return lineError(n, "%s", err)
 			}
 			if !slices.ContainsFunc(i.DNSSearch, func(d string) bool { return strings.TrimSuffix(strings.ToLower(d), ".") == folded }) {
 				i.DNSSearch = append(i.DNSSearch, entry)

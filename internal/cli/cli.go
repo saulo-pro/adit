@@ -44,6 +44,9 @@ Usage:
                                    it is down by choice (always), or never
   sudo adit lan NAME allow|block   whether a full tunnel lets the local network
                                    (printers, shares, AirDrop) be reached
+  sudo adit dns NAME DOMAIN...|none
+                                   send names under these domains to the tunnel's
+                                   DNS servers, beside those its file names
   sudo adit install [--aditd PATH] install aditd, start it now and at every boot,
                                    and let you use adit without a password
   sudo adit uninstall [--keep-tunnels] [--yes]
@@ -105,6 +108,7 @@ var commands = map[string]command{
 	"autostart":  (*CLI).autostart,
 	"killswitch": (*CLI).killswitch,
 	"lan":        (*CLI).lan,
+	"dns":        (*CLI).dns,
 	"route":      (*CLI).route,
 	"signin":     (*CLI).signin,
 	"import":     (*CLI).importFile,

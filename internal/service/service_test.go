@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -210,6 +211,9 @@ type fakeDevices []*fakeDevice
 
 func (d fakeDevices) last() *fakeDevice { return d[len(d)-1] }
 
+// flushes counts the DNS cache flushes the tests' managers asked for.
+var flushes atomic.Int64
+
 func newTestManager(t *testing.T) (*Manager, *fakeDevices) {
 	t.Helper()
 	st, err := store.Open(filepath.Join(t.TempDir(), "tunnels"))
@@ -236,6 +240,7 @@ func newTestManager(t *testing.T) (*Manager, *fakeDevices) {
 		resolvers: &dns.Resolvers{Dir: filepath.Join(t.TempDir(), "resolver")},
 		bypass:    &fakeBypass{},
 		firewall:  &fakeFirewall{},
+		flushDNS:  func() { flushes.Add(1) },
 		signIn:    2 * time.Minute,
 		dnsAll:    &fakeDefaultDNS{set: map[string][]netip.Addr{}},
 		routes:    func() ([]routes.Route, error) { return nil, nil },
@@ -585,8 +590,71 @@ func TestDNSWithoutADomainIsExplained(t *testing.T) {
 	m, _ := newTestManager(t)
 	importText(t, m, "work", fileWith("10.99.1.0/24", "10.99.1.1"))
 	status, _ := m.Status("work")
-	if len(status.Notes) != 1 || !strings.HasPrefix(status.Notes[0], "DNS 10.99.1.1 is not used: adit sends a tunnel's DNS queries only for the domains on its DNS line") {
+	if len(status.Notes) != 1 || !strings.Contains(status.Notes[0], "its DNS server 10.99.1.1 is not used") || !strings.Contains(status.Notes[0], "run sudo adit dns work corp.example (with its own domains)") {
 		t.Errorf("notes %q", status.Notes)
+	}
+	if err := m.SetDomains("work", []string{"internal"}); err != nil {
+		t.Fatal(err)
+	}
+	if status, _ := m.Status("work"); len(status.Notes) != 0 {
+		t.Errorf("the fix left notes %q", status.Notes)
+	}
+}
+
+func TestDomainsTakeEffectOnATunnelThatIsUp(t *testing.T) {
+	m, _ := newTestManager(t)
+	importText(t, m, "work", fileWith("10.99.1.0/24", "10.99.1.1"))
+	if err := m.Up(context.Background(), "work"); err != nil {
+		t.Fatal(err)
+	}
+	before := flushes.Load()
+	if err := m.SetDomains("work", []string{"diner.example", "internal"}); err != nil {
+		t.Fatal(err)
+	}
+	if flushes.Load() == before {
+		t.Error("macOS keeps the answers it cached before the domains were given")
+	}
+	for _, domain := range []string{"diner.example", "internal"} {
+		if _, err := os.Stat(filepath.Join(m.resolvers.Dir, domain)); err != nil {
+			t.Errorf("no resolver file for %s: %v", domain, err)
+		}
+	}
+	if err := m.SetDomains("work", nil); err != nil {
+		t.Fatal(err)
+	}
+	if entries, _ := os.ReadDir(m.resolvers.Dir); len(entries) != 0 {
+		t.Errorf("none left %d resolver files", len(entries))
+	}
+}
+
+func TestDomainsAreChecked(t *testing.T) {
+	m, _ := newTestManager(t)
+	importText(t, m, "work", fileWith("10.99.1.0/24", "10.99.1.1"))
+	importText(t, m, "diner", splitFile("10.99.2.0/24", "10.99.2.1, diner.example"))
+	importText(t, m, "manhattan", fullFile("0.0.0.0/0", "10.64.0.1"))
+	mustImport(t, m, "nodns")
+	for _, c := range []struct {
+		name    string
+		domains []string
+		want    string
+	}{
+		{"work", []string{"com"}, "a whole top-level domain"},
+		{"work", []string{"printer.local"}, "mDNS"},
+		{"work", []string{"diner.example; rm"}, "not a domain name"},
+		{"manhattan", []string{"corp.example"}, "answer every name already"},
+		{"nodns", []string{"corp.example"}, "has no DNS server"},
+	} {
+		if err := m.SetDomains(c.name, c.domains); err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s %v: got %v", c.name, c.domains, err)
+		}
+	}
+	m.Up(context.Background(), "diner")
+	m.Up(context.Background(), "work")
+	if err := m.SetDomains("work", []string{"www.diner.example"}); !errors.Is(err, ErrConflict) {
+		t.Errorf("a domain under one diner resolves: %v", err)
+	}
+	if status, _ := m.Status("work"); len(status.Notes) != 1 {
+		t.Errorf("a refused change was kept: %q", status.Notes)
 	}
 }
 
@@ -901,7 +969,7 @@ func TestAFullTunnelNeedsADNSServer(t *testing.T) {
 	m, devices := newTestManager(t)
 	importText(t, m, "manhattan", fullFile("0.0.0.0/0", ""))
 	err := m.Up(context.Background(), "manhattan")
-	if err == nil || !strings.Contains(err.Error(), "manhattan routes everything but names no DNS server") {
+	if err == nil || !strings.Contains(err.Error(), "manhattan routes everything but has no DNS server") {
 		t.Errorf("got %v", err)
 	}
 	if len(*devices) != 0 {

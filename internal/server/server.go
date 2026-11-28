@@ -34,6 +34,7 @@ type Tunnels interface {
 	SetAutostart(name string, on bool) error
 	SetKillSwitch(name, mode string) error
 	SetLAN(name, mode string) error
+	SetDomains(name string, domains []string) error
 	SignIn() (time.Time, error)
 	List() ([]service.Status, error)
 	Status(name string) (service.Status, error)
@@ -52,11 +53,11 @@ const (
 
 // rootOnly are the commands a member of the group may not use: they add routes, delete tunnels,
 // hand out private keys or choose when the Mac is protected by a kill switch.
-var rootOnly = map[string]bool{api.CommandImport: true, api.CommandRemove: true, api.CommandExport: true, api.CommandKillSwitch: true, api.CommandLAN: true}
+var rootOnly = map[string]bool{api.CommandImport: true, api.CommandRemove: true, api.CommandExport: true, api.CommandKillSwitch: true, api.CommandLAN: true, api.CommandDNS: true}
 
 var needsName = map[string]bool{
 	api.CommandStatus: true, api.CommandUp: true, api.CommandDown: true, api.CommandAutostart: true,
-	api.CommandImport: true, api.CommandRemove: true, api.CommandExport: true, api.CommandKillSwitch: true, api.CommandLAN: true,
+	api.CommandImport: true, api.CommandRemove: true, api.CommandExport: true, api.CommandKillSwitch: true, api.CommandLAN: true, api.CommandDNS: true,
 }
 
 var known = map[string]bool{api.CommandList: true, api.CommandWatch: true, api.CommandVersion: true, api.CommandSignIn: true}
@@ -290,6 +291,12 @@ func (s *Server) dispatch(ctx context.Context, req api.Request) api.Response {
 		}
 		return s.tunnel(req.Name)
 
+	case api.CommandDNS:
+		if err := s.tunnels.SetDomains(req.Name, req.Domains); err != nil {
+			return fail(err)
+		}
+		return s.tunnel(req.Name)
+
 	case api.CommandLAN:
 		if err := s.tunnels.SetLAN(req.Name, req.Mode); err != nil {
 			return fail(err)
@@ -464,6 +471,7 @@ func toAPI(statuses []service.Status) []api.Tunnel {
 			KillSwitch:    status.KillSwitch,
 			Blocking:      status.Blocking,
 			LAN:           status.LAN,
+			Networks:      status.Networks,
 			Interface:     status.Interface,
 			ReceivedBytes: status.Received,
 			SentBytes:     status.Sent,

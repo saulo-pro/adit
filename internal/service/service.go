@@ -51,6 +51,7 @@ type Status struct {
 	KillSwitch    string   // a full tunnel's kill switch setting; empty for a split tunnel
 	Blocking      bool     // its kill switch blocks the internet now: it is not up
 	LAN           string   // a full tunnel's local network setting: allow or block
+	Networks      []string // its AllowedIPs, as networks
 	Source        string   // "adit", or the other software running it
 	ReadOnly      bool     // another program's tunnel: adit shows it and leaves it alone
 }
@@ -107,6 +108,7 @@ type system struct {
 	firewall  killSwitch
 	dnsAll    defaultResolver
 	signIn    time.Duration                  // how long "Sign in to this network" lifts the kill switch
+	flushDNS  func()                         // forgets the answers macOS cached, after adit changes where names go
 	routes    func() ([]routes.Route, error) // the routing table: other tunnels and the local network
 	others    func() []others.Tunnel         // other software's tunnels: the WireGuard app's, wg-quick's
 	retryWait time.Duration                  // the first pause between tries of an autostart tunnel
@@ -172,6 +174,10 @@ func New(st *store.Store, log *slog.Logger) *Manager {
 			return command.CombinedOutput()
 		}},
 		signIn: 2 * time.Minute,
+		flushDNS: func() {
+			exec.Command("/usr/bin/dscacheutil", "-flushcache").Run()
+			exec.Command("/usr/bin/killall", "-HUP", "mDNSResponder").Run()
+		},
 		dnsAll: &dnsdefault.Default{Run: func(script string) ([]byte, error) {
 			command := exec.Command("/usr/sbin/scutil")
 			command.Stdin = strings.NewReader(script)
@@ -389,6 +395,7 @@ func (m *Manager) up(ctx context.Context, name string, r *retry) error {
 		m.reapply()
 		return fmt.Errorf("%s did not come up, since its DNS could not be set: %w", t.Name, err)
 	}
+	m.flush()
 	m.running[t.Name] = &running{dev: dev, config: t.Config, shape: shape, notes: notes}
 	m.reapply()
 	m.log.Info("tunnel up", "tunnel", t.Name, "interface", dev.Interface(), "full", shape.full)
@@ -413,7 +420,7 @@ func shapeOf(t *store.Tunnel) (shape, error) {
 		return shape{}, nil
 	}
 	if len(t.Config.Interface.DNS) == 0 {
-		return shape{}, fmt.Errorf("%s routes everything but names no DNS server, so names would still be looked up outside the tunnel; add a line such as DNS = 10.64.0.1 with the server its provider gives", t.Name)
+		return shape{}, fmt.Errorf("%s routes everything but has no DNS server, so names would still be looked up outside the tunnel; add the server its provider gives to its file: sudo adit export %s --output %s.conf, add DNS = 10.64.0.1 under [Interface], then sudo adit remove %s and sudo adit import %s.conf", t.Name, t.Name, t.Name, t.Name, t.Name)
 	}
 	return shape{full: true, ipv6: full6}, nil
 }
@@ -881,8 +888,9 @@ func fullNotes(s shape, killSwitch, lan string) []string {
 	return notes
 }
 
-// dnsNotes say when a DNS line does nothing: adit scopes DNS to domains.
-func dnsNotes(c *conf.Config) []string {
+// dnsNotes say when a tunnel's DNS setting does nothing, and how to fix it: adit sends a split
+// tunnel's DNS queries only for the domains it is given.
+func dnsNotes(name string, c *conf.Config) []string {
 	if full4, _ := covers(c); full4 {
 		return nil // its servers answer every name
 	}
@@ -893,9 +901,9 @@ func dnsNotes(c *conf.Config) []string {
 		for n, server := range i.DNS {
 			servers[n] = server.String()
 		}
-		return []string{fmt.Sprintf("DNS %s is not used: adit sends a tunnel's DNS queries only for the domains on its DNS line, and this line names none", strings.Join(servers, ", "))}
+		return []string{fmt.Sprintf("its DNS server %s is not used: adit sends a tunnel's DNS queries only for the domains you name; run sudo adit dns %s corp.example (with its own domains) to send the names under them there", strings.Join(servers, ", "), name)}
 	case len(i.DNS) == 0 && len(i.DNSSearch) > 0:
-		return []string{fmt.Sprintf("the DNS domains %s are not used: the DNS line names no server for them", strings.Join(i.DNSSearch, ", "))}
+		return []string{fmt.Sprintf("the DNS domains %s are not used: the tunnel has no DNS server for them (DNS = 10.99.1.1 in its file)", strings.Join(i.DNSSearch, ", "))}
 	}
 	return nil
 }
@@ -938,10 +946,19 @@ func (m *Manager) down(name string) {
 }
 
 func (m *Manager) clearDNS(name string, s shape) error {
+	defer m.flush()
 	if s.full {
 		return m.dnsAll.Clear(name)
 	}
 	return m.resolvers.Clear(name)
+}
+
+// flush makes macOS forget the answers it cached: a name that failed before a tunnel's DNS came up
+// would otherwise keep failing for as long as the failure is cached.
+func (m *Manager) flush() {
+	if m.flushDNS != nil {
+		m.flushDNS()
+	}
 }
 
 // SetAutostart chooses whether a tunnel comes up when aditd starts.
@@ -986,6 +1003,73 @@ func (m *Manager) SetKillSwitch(name, mode string) error {
 	err = m.apply()
 	m.notify()
 	return err
+}
+
+// maxDomains matches how many DNS domains a file may name.
+const maxDomains = 32
+
+// SetDomains gives a split tunnel the DNS domains whose names go to its DNS servers, beside any on its
+// file's DNS line; none takes them away again. On a tunnel that is up it takes effect at once.
+func (m *Manager) SetDomains(name string, given []string) error {
+	for _, domain := range given {
+		if err := conf.CheckDomain(domain); err != nil {
+			return err
+		}
+	}
+	if len(given) > maxDomains {
+		return fmt.Errorf("that is %d domains; adit takes at most %d", len(given), maxDomains)
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	t, err := m.store.Get(name)
+	if err != nil {
+		return err
+	}
+	if full4, _ := covers(t.Config); full4 {
+		return fmt.Errorf("%s routes everything, so its DNS servers answer every name already; domains are for a tunnel that routes only its own networks", t.Name)
+	}
+	if len(t.Config.Interface.DNS) == 0 && len(given) > 0 {
+		return fmt.Errorf("%s has no DNS server for those names to go to; its file needs one, such as DNS = 10.99.1.1", t.Name)
+	}
+	settings := t.Settings
+	settings.Domains = given
+	if err := m.store.SetSettings(t.Name, settings); err != nil {
+		return err
+	}
+	updated, err := m.store.Get(t.Name)
+	if err != nil {
+		return err
+	}
+	if r, up := m.running[t.Name]; up {
+		// Checked like any tunnel coming up: no domain another tunnel or resolver file has.
+		for other, sibling := range m.siblings(t.Name) {
+			for _, d := range domains(updated.Config) {
+				for _, e := range domains(sibling.config) {
+					if sameDomain(d, e) {
+						m.store.SetSettings(t.Name, t.Settings)
+						return conflict("the DNS domain %s is already resolved through %s, which is up", d, other)
+					}
+				}
+			}
+		}
+		if err := m.resolvers.Set(t.Name, updated.Config.Interface.DNS, domains(updated.Config)); err != nil {
+			m.store.SetSettings(t.Name, t.Settings)
+			m.resolvers.Set(t.Name, t.Config.Interface.DNS, domains(t.Config))
+			if errors.Is(err, dns.ErrNotOurs) {
+				return conflict("%s", err)
+			}
+			return err
+		}
+		if len(domains(updated.Config)) == 0 {
+			m.resolvers.Clear(t.Name)
+		}
+		r.config = updated.Config
+		m.flush()
+	}
+	m.log.Info("DNS domains set", "tunnel", t.Name, "domains", strings.Join(given, ","))
+	m.notify()
+	return nil
 }
 
 // SetLAN chooses whether a full tunnel lets the local network be reached: LANAllow or LANBlock.
@@ -1074,7 +1158,10 @@ func (m *Manager) Status(name string) (Status, error) {
 }
 
 func (m *Manager) status(t *store.Tunnel, blocking []string) (Status, error) {
-	status := Status{Name: t.Name, Autostart: t.Settings.Autostart, State: StateDown, Notes: dnsNotes(t.Config), Source: "adit"}
+	status := Status{Name: t.Name, Autostart: t.Settings.Autostart, State: StateDown, Notes: dnsNotes(t.Name, t.Config), Source: "adit"}
+	for _, network := range networks(t.Config) {
+		status.Networks = append(status.Networks, network.String())
+	}
 	full4, _ := covers(t.Config)
 	if full4 {
 		status.KillSwitch = t.Settings.KillSwitchMode()
