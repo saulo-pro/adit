@@ -3,7 +3,7 @@
 A client for WireGuard® tunnels on macOS that keeps several of them up at once, with a menu bar
 icon and a command line that do the same things.
 
-> **Status:** 0.2.1: full tunnels, beside split tunnels, with a kill switch.
+> **Status:** 0.2.2: full tunnels, beside split tunnels, with a kill switch.
 
 ## What it is for
 

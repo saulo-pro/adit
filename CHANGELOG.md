@@ -7,6 +7,14 @@ notes of its GitHub release.
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-11-28
+
+### Fixed
+
+- Upgrading no longer leaves the menu bar icon off until the next login: macOS refuses to start it for
+  a few seconds while it registers the changed login item, so the installer waits for the old one to
+  stop and tries again. If it still cannot, it says the command that starts it.
+
 ## [0.2.1] - 2026-11-28
 
 What the first days with 0.2.0 asked for: a way to act on a tunnel's DNS note, the notes in the
@@ -179,7 +187,8 @@ The first version, for macOS.
 - Homebrew: `brew install saulo-pro/tap/adit`.
 - Full tunnels (`AllowedIPs = 0.0.0.0/0`) are refused for now, saying so.
 
-[Unreleased]: https://github.com/saulo-pro/adit/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/saulo-pro/adit/compare/v0.2.2...HEAD
+[0.2.2]: https://github.com/saulo-pro/adit/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/saulo-pro/adit/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/saulo-pro/adit/compare/v0.1.3...v0.2.0
 [0.1.3]: https://github.com/saulo-pro/adit/compare/v0.1.2...v0.1.3

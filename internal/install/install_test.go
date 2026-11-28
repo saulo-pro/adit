@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/saulo-pro/adit/internal/dns"
 )
@@ -185,10 +186,12 @@ func TestAllowNeedsTheGroup(t *testing.T) {
 
 // fakeSystem stands in for launchctl, dscl and dseditgroup.
 type fakeSystem struct {
-	group  bool // the adit group exists
-	adits  bool // and adit created it
-	loaded bool // aditd is in launchd
-	ran    []string
+	trayLoaded   bool
+	trayRefusals int  // bootstraps of the menu bar icon macOS refuses first
+	group        bool // the adit group exists
+	adits        bool // and adit created it
+	loaded       bool // aditd is in launchd
+	ran          []string
 }
 
 func (s *fakeSystem) run(name string, args ...string) ([]byte, error) {
@@ -220,6 +223,20 @@ func (s *fakeSystem) run(name string, args ...string) ([]byte, error) {
 		s.loaded = false
 	case strings.Contains(command, "launchctl bootstrap system"):
 		s.loaded = true
+	case strings.Contains(command, "launchctl print gui/"):
+		if !s.trayLoaded {
+			return []byte("Could not find service"), errors.New("exit status 113")
+		}
+		return nil, nil
+	case strings.Contains(command, "launchctl bootout gui/"):
+		s.trayLoaded = false
+	case strings.Contains(command, "launchctl bootstrap gui/"):
+		if s.trayRefusals > 0 {
+			s.trayRefusals--
+			s.ran = append(s.ran, command)
+			return []byte("Bootstrap failed: 5: Input/output error"), errors.New("exit status 5")
+		}
+		s.trayLoaded = true
 	case name == "/usr/bin/dscacheutil":
 		return nil, nil
 	}
@@ -254,4 +271,38 @@ func assertMode(t *testing.T, path string, want os.FileMode) {
 	if got := info.Mode().Perm(); got != want {
 		t.Errorf("%s has mode %o, want %o", filepath.Base(path), got, want)
 	}
+}
+
+func TestTheMenuBarIconStartsAfterMacOSRefusedItForAMoment(t *testing.T) {
+	i, sys := newInstaller(t)
+	i.TrayWait = 5 * time.Second
+	sys.trayRefusals = 2
+	var out strings.Builder
+	if err := i.Install(trayOptions(t), &out); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out.String(), "did not start now") || !sys.trayLoaded {
+		t.Errorf("the icon did not start after two refusals:\n%s", out.String())
+	}
+}
+
+func TestTheMenuBarIconThatNeverStartsSaysHow(t *testing.T) {
+	i, sys := newInstaller(t)
+	sys.trayRefusals = 1000
+	var out strings.Builder
+	if err := i.Install(trayOptions(t), &out); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "Input/output error); it will at the next login, or now with: launchctl bootstrap gui/501 /Library/LaunchAgents/pro.saulo.adit.tray.plist") {
+		t.Errorf("got:\n%s", out.String())
+	}
+}
+
+// trayOptions installs a made-up aditd and menu bar icon for max, uid 501.
+func trayOptions(t *testing.T) Options {
+	source := filepath.Join(t.TempDir(), "aditd")
+	os.WriteFile(source, []byte("the aditd binary"), 0o700)
+	tray := filepath.Join(t.TempDir(), "adit-tray")
+	os.WriteFile(tray, []byte("the tray binary"), 0o700)
+	return Options{Aditd: source, Tray: tray, User: "max", UID: 501}
 }

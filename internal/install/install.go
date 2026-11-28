@@ -63,6 +63,9 @@ type Installer struct {
 	Run   func(name string, args ...string) ([]byte, error) // runs system tools: launchctl, dseditgroup
 	Chown func(path string, uid, gid int) error
 	Wait  time.Duration // how long to wait for aditd to stop
+	// TrayWait is how long to keep trying to start the menu bar icon in the person's session: macOS
+	// refuses it for a few seconds while it registers the changed login item.
+	TrayWait time.Duration
 }
 
 func New() *Installer {
@@ -70,8 +73,9 @@ func New() *Installer {
 		Run: func(name string, args ...string) ([]byte, error) {
 			return exec.Command(name, args...).CombinedOutput()
 		},
-		Chown: os.Chown,
-		Wait:  30 * time.Second,
+		Chown:    os.Chown,
+		Wait:     30 * time.Second,
+		TrayWait: 20 * time.Second,
 	}
 }
 
@@ -157,13 +161,40 @@ func (i *Installer) Install(o Options, out io.Writer) error {
 	}
 	fmt.Fprintf(out, "The menu bar icon starts at every login (%s).\n", TrayAgent)
 	if o.UID > 0 {
-		// Restart it in this session too, so an upgrade shows at once.
-		i.Run("/bin/launchctl", "bootout", fmt.Sprintf("gui/%d/%s", o.UID, TrayLabel))
-		if output, err := i.Run("/bin/launchctl", "bootstrap", fmt.Sprintf("gui/%d", o.UID), i.path(TrayAgent)); err != nil {
-			fmt.Fprintf(out, "The menu bar icon did not start now (%s); it will at the next login.\n", clean(output))
+		if err := i.startTray(o.UID); err != nil {
+			fmt.Fprintf(out, "The menu bar icon did not start now (%s); it will at the next login, or now with: launchctl bootstrap gui/%d %s\n", err, o.UID, TrayAgent)
 		}
 	}
 	return nil
+}
+
+// startTray restarts the menu bar icon in the person's session, so an upgrade shows at once. The old
+// one must be gone before the new one is loaded, and macOS refuses the load (an input/output error)
+// while it registers the changed login item and tells the person it may run in the background: keep
+// trying for TrayWait.
+func (i *Installer) startTray(uid int) error {
+	domain, service := fmt.Sprintf("gui/%d", uid), fmt.Sprintf("gui/%d/%s", uid, TrayLabel)
+	i.Run("/bin/launchctl", "bootout", service)
+	deadline := time.Now().Add(i.TrayWait)
+	for {
+		if _, err := i.Run("/bin/launchctl", "print", service); err != nil {
+			break // gone
+		}
+		if time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	for {
+		output, err := i.Run("/bin/launchctl", "bootstrap", domain, i.path(TrayAgent))
+		if err == nil {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return errors.New(clean(output))
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
 }
 
 // Uninstall stops aditd, which takes its tunnels down, and removes everything Install made, the
